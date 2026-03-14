@@ -6,6 +6,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import jdk.jfr.Enabled
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -24,9 +25,8 @@ fun App() {
                 onDismiss = {
                     if (TokenStorage.hasCredentials()) showTokenDialog = false
                 },
-                onSave = { token, folderId ->
+                onSave = { token ->
                     TokenStorage.iamToken = token
-                    TokenStorage.folderId = folderId
                     showTokenDialog = false
                 }
             )
@@ -39,10 +39,9 @@ fun App() {
 @Composable
 private fun TokenDialog(
     onDismiss: () -> Unit,
-    onSave: (token: String, folderId: String) -> Unit,
+    onSave: (token: String) -> Unit,
 ) {
     var token by remember { mutableStateOf(TokenStorage.iamToken) }
-    var folderId by remember { mutableStateOf(TokenStorage.folderId) }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -56,19 +55,12 @@ private fun TokenDialog(
                     modifier = Modifier.fillMaxWidth(),
                     singleLine = true,
                 )
-                OutlinedTextField(
-                    value = folderId,
-                    onValueChange = { folderId = it },
-                    label = { Text("Folder ID") },
-                    modifier = Modifier.fillMaxWidth(),
-                    singleLine = true,
-                )
             }
         },
         confirmButton = {
             Button(
-                onClick = { onSave(token, folderId) },
-                enabled = token.isNotBlank() && folderId.isNotBlank(),
+                onClick = { onSave(token) },
+                enabled = token.isNotBlank(),
             ) {
                 Text("Сохранить")
             }
@@ -142,22 +134,27 @@ private fun MainScreen(onTokenRefresh: () -> Unit) {
                     Text("SSML")
                 }
 
-                DropdownSelector("Голос", voices, selectedVoice) { selectedVoice = it }
+                if (isSSML.not()) {
+                    DropdownSelector("Голос", voices, selectedVoice) { selectedVoice = it }
+                }
+
                 DropdownSelector("Язык", languages, selectedLang) { selectedLang = it }
                 DropdownSelector("Формат", formats, selectedFormat) { selectedFormat = it }
             }
 
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                Text("Скорость: ${"%.1f".format(speed)}")
-                Slider(
-                    value = speed,
-                    onValueChange = { speed = it },
-                    valueRange = 0.1f..3.0f,
-                    modifier = Modifier.width(200.dp),
-                )
+            if (isSSML.not()) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Text("Скорость: ${"%.1f".format(speed)}")
+                    Slider(
+                        value = speed,
+                        onValueChange = { speed = it },
+                        valueRange = 0.1f..3.0f,
+                        modifier = Modifier.width(200.dp),
+                    )
+                }
             }
 
             Row(
@@ -177,7 +174,6 @@ private fun MainScreen(onTokenRefresh: () -> Unit) {
                                     speed = speed,
                                     format = selectedFormat,
                                     lang = selectedLang,
-                                    folderId = TokenStorage.folderId,
                                     token = TokenStorage.iamToken,
                                 )
                                 val filePath = saveAudioFile(audioBytes, selectedFormat)
