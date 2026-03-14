@@ -56,6 +56,18 @@ object TextParser {
         return MARKER_REGEX.findAll(input).map { it.groupValues[1].trim() }.toSet()
     }
 
+    fun extractVoiceEmotions(input: String): Map<String, Set<String>> {
+        val result = mutableMapOf<String, MutableSet<String>>()
+        for (match in MARKER_REGEX.findAll(input)) {
+            val voice = match.groupValues[1].trim()
+            val emotion = match.groupValues[2].trim()
+            if (emotion.isNotBlank()) {
+                result.getOrPut(voice) { mutableSetOf() }.add(emotion)
+            }
+        }
+        return result
+    }
+
     fun hasVoiceMarkers(input: String): Boolean {
         return MARKER_REGEX.containsMatchIn(input)
     }
