@@ -19,6 +19,7 @@ object SpeechKitApi {
         speed: Float,
         format: String,
         lang: String,
+        emotion: String?,
         token: String,
     ): ByteArray {
         val response = client.submitForm(
@@ -28,11 +29,14 @@ object SpeechKitApi {
                     append("ssml", text)
                 } else {
                     append("text", text)
-                    append("voice", voice)
-                    append("speed", speed.toString())
                 }
+                append("voice", voice)
+                append("speed", speed.toString())
                 append("lang", lang)
                 append("format", format)
+                if (!emotion.isNullOrBlank()) {
+                    append("emotion", emotion)
+                }
             }
         ) {
             header(HttpHeaders.Authorization, "Api-Key $token")
