@@ -406,6 +406,9 @@ private fun VoiceMappingPanel(
                 val textRoles = voiceRoles[name]
                 val selectedApiVoice = mapping[name] ?: API_VOICES[0]
                 val apiVoiceInfo = API_VOICES_INFO.find { it.id == selectedApiVoice }
+                val availableRoles = apiVoiceInfo?.roles?.toSet() ?: emptySet()
+                val missingRoles = textRoles?.filter { it !in availableRoles } ?: emptyList()
+                val hasMismatch = missingRoles.isNotEmpty()
 
                 Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                     Row(
@@ -414,12 +417,20 @@ private fun VoiceMappingPanel(
                         modifier = Modifier.fillMaxWidth(),
                     ) {
                         Column(modifier = Modifier.weight(1f)) {
-                            Text(text = name, style = MaterialTheme.typography.bodyMedium)
+                            Text(
+                                text = name,
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = if (hasMismatch) MaterialTheme.colorScheme.error
+                                    else MaterialTheme.colorScheme.onSurface,
+                            )
                             if (!textRoles.isNullOrEmpty()) {
                                 Text(
-                                    text = "роли: ${textRoles.joinToString(", ")}",
+                                    text = "роли: " + textRoles.joinToString(", ") { role ->
+                                        if (role in availableRoles) role else "$role ✗"
+                                    },
                                     style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    color = if (hasMismatch) MaterialTheme.colorScheme.error
+                                        else MaterialTheme.colorScheme.onSurfaceVariant,
                                 )
                             }
                         }
@@ -438,7 +449,8 @@ private fun VoiceMappingPanel(
                             Text(
                                 text = "${apiVoiceInfo.gender}, ${apiVoiceInfo.roles.joinToString(", ")}",
                                 style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.primary,
+                                color = if (hasMismatch) MaterialTheme.colorScheme.error
+                                    else MaterialTheme.colorScheme.primary,
                                 modifier = Modifier.weight(1f),
                             )
                         } else {
