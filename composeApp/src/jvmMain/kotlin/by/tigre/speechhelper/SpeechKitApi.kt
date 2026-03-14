@@ -19,7 +19,6 @@ object SpeechKitApi {
         speed: Float,
         format: String,
         lang: String,
-        folderId: String,
         token: String,
     ): ByteArray {
         val response = client.submitForm(
@@ -29,19 +28,19 @@ object SpeechKitApi {
                     append("ssml", text)
                 } else {
                     append("text", text)
+                    append("voice", voice)
+                    append("speed", speed.toString())
                 }
                 append("lang", lang)
-                append("voice", voice)
-                append("speed", speed.toString())
                 append("format", format)
-                append("folderId", folderId)
             }
         ) {
-            header(HttpHeaders.Authorization, "Bearer $token")
+            header(HttpHeaders.Authorization, "Api-Key $token")
         }
 
         if (response.status != HttpStatusCode.OK) {
             val body = response.bodyAsText()
+            println("API error ${response.status.value}: $body")
             throw SpeechKitException("API error ${response.status.value}: $body")
         }
 
