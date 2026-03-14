@@ -15,15 +15,25 @@ import java.io.File
 import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
 
-private val API_VOICES = listOf(
-    "alena", "filipp", "ermil", "jane", "madirus",
-    "omazh", "zahar", "dasha", "julia", "lera",
-    "masha", "marina", "alexander", "kirill", "anton",
+data class VoiceInfo(val id: String, val gender: String, val roles: List<String>)
+
+private val API_VOICES_INFO = listOf(
+    VoiceInfo("dasha", "Ж", listOf("neutral", "good", "friendly")),
+    VoiceInfo("julia", "Ж", listOf("neutral", "strict")),
+    VoiceInfo("lera", "Ж", listOf("neutral", "friendly")),
+    VoiceInfo("masha", "Ж", listOf("good", "strict", "friendly")),
+    VoiceInfo("alexander", "М", listOf("neutral", "good")),
+    VoiceInfo("kirill", "М", listOf("neutral", "strict", "good")),
+    VoiceInfo("anton", "М", listOf("neutral", "good")),
+    VoiceInfo("saule_ru", "Ж", listOf("neutral", "strict", "whisper")),
+    VoiceInfo("zamira_ru", "Ж", listOf("neutral", "strict", "friendly")),
+    VoiceInfo("zhanar_ru", "Ж", listOf("neutral", "strict", "friendly")),
+    VoiceInfo("yulduz_ru", "Ж", listOf("neutral", "strict", "friendly", "whisper")),
 )
 
-private val LANGUAGES = listOf("ru-RU", "en-US", "kk-KK", "de-DE", "uz-UZ")
+private val API_VOICES = API_VOICES_INFO.map { it.id }
 
-private val FORMATS = listOf("oggopus", "mp3", "lpcm")
+private val FORMATS = listOf("mp3", "ogg", "wav")
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -90,11 +100,9 @@ private fun MainScreen(onTokenRefresh: () -> Unit) {
     val scope = rememberCoroutineScope()
 
     var text by remember { mutableStateOf(SessionStorage.text) }
-    var isSSML by remember { mutableStateOf(false) }
     var selectedVoice by remember { mutableStateOf(API_VOICES[0]) }
-    var selectedLang by remember { mutableStateOf(LANGUAGES[0]) }
     var selectedFormat by remember { mutableStateOf(FORMATS[0]) }
-    var speed by remember { mutableFloatStateOf(1.0f) }
+    var speed by remember { mutableStateOf(1.0) }
 
     var isLoading by remember { mutableStateOf(false) }
     var progressMessage by remember { mutableStateOf("") }
@@ -117,8 +125,8 @@ private fun MainScreen(onTokenRefresh: () -> Unit) {
     val detectedVoices: Set<String> = remember(text) {
         if (hasMarkers) TextParser.extractVoiceNames(text) else emptySet()
     }
-    val voiceEmotions: Map<String, Set<String>> = remember(text) {
-        if (hasMarkers) TextParser.extractVoiceEmotions(text) else emptyMap()
+    val voiceRoles: Map<String, Set<String>> = remember(text) {
+        if (hasMarkers) TextParser.extractVoiceRoles(text) else emptyMap()
     }
 
     // Ensure all detected voices have a mapping
@@ -139,7 +147,7 @@ private fun MainScreen(onTokenRefresh: () -> Unit) {
         SessionStorage.voiceMapping = voiceMapping.toMap()
     }
 
-    fun launchMultiVoiceSynthesis() {
+    fun launchMultiVoiceSynthesis(retryVoice: String? = null) {
         val segments = TextParser.parse(text)
         if (segments.isEmpty()) {
             statusMessage = "Ошибка: не найдены сегменты текста"
@@ -151,34 +159,72 @@ private fun MainScreen(onTokenRefresh: () -> Unit) {
             statusMessage = ""
             progressMessage = ""
             try {
-                val audioParts = mutableListOf<ByteArray>()
+                val cacheDir = withContext(Dispatchers.IO) {
+                    File(System.getProperty("user.home"), "SpeechHelper/cache").apply { mkdirs() }
+                }
+                val errors = mutableListOf<String>()
+
                 for ((index, segment) in segments.withIndex()) {
                     val apiVoice = voiceMapping[segment.voiceName] ?: API_VOICES[0]
+                    val partFile = File(cacheDir, "part_%03d.mp3".format(index))
+
+                    // Skip already cached unless retrying this voice
+                    if (partFile.exists() && (retryVoice == null || segment.voiceName != retryVoice)) {
+                        progressMessage = "Часть ${index + 1} из ${segments.size} — кэш"
+                        continue
+                    }
+
                     progressMessage = "Обработка ${index + 1} из ${segments.size} (${segment.voiceName} -> $apiVoice)..."
-                    val ssmlText = "<speak>${segment.text}</speak>"
-                    val bytes = SpeechKitApi.synthesize(
-                        text = ssmlText,
-                        isSSML = true,
-                        voice = apiVoice,
-                        speed = segment.speed,
-                        format = "mp3",
-                        lang = selectedLang,
-                        emotion = segment.emotion,
-                        token = TokenStorage.iamToken,
-                    )
-                    audioParts.add(bytes)
+                    try {
+                        val bytes = SpeechKitApi.synthesize(
+                            text = segment.text,
+                            voice = apiVoice,
+                            role = segment.role,
+                            speed = segment.speed,
+                            format = "mp3",
+                            token = TokenStorage.iamToken,
+                        )
+                        withContext(Dispatchers.IO) { partFile.writeBytes(bytes) }
+                    } catch (e: Exception) {
+                        errors.add("#${index + 1} ${segment.voiceName}: ${e.message}")
+                        // Delete failed part so it will be retried next time
+                        partFile.delete()
+                    }
                 }
+
+                // Assemble all available parts in order
                 progressMessage = "Склейка аудио..."
-                val combined = audioParts.reduce { acc, bytes -> acc + bytes }
-                val filePath = saveAudioFile(combined, "mp3")
-                statusMessage = "Сохранено (${segments.size} сегментов): $filePath"
-            } catch (e: Exception) {
-                statusMessage = "Ошибка: ${e.message}"
+                val allParts = (0 until segments.size).mapNotNull { i ->
+                    val f = File(cacheDir, "part_%03d.mp3".format(i))
+                    if (f.exists()) f.readBytes() else null
+                }
+
+                if (allParts.isEmpty()) {
+                    statusMessage = "Ошибка: ни один сегмент не озвучен"
+                } else {
+                    val combined = allParts.reduce { acc, bytes -> acc + bytes }
+                    val filePath = saveAudioFile(combined, "mp3")
+                    val successCount = allParts.size
+                    val totalCount = segments.size
+                    statusMessage = if (errors.isEmpty()) {
+                        "Сохранено ($totalCount сегментов): $filePath"
+                    } else {
+                        "Сохранено ($successCount/$totalCount): $filePath\nОшибки:\n${errors.joinToString("\n")}"
+                    }
+                }
             } finally {
                 isLoading = false
                 progressMessage = ""
             }
         }
+    }
+
+    fun clearCache() {
+        val cacheDir = File(System.getProperty("user.home"), "SpeechHelper/cache")
+        if (cacheDir.exists()) {
+            cacheDir.listFiles()?.forEach { it.delete() }
+        }
+        statusMessage = "Кэш очищен"
     }
 
     fun launchSimpleSynthesis() {
@@ -189,12 +235,10 @@ private fun MainScreen(onTokenRefresh: () -> Unit) {
             try {
                 val audioBytes = SpeechKitApi.synthesize(
                     text = text,
-                    isSSML = isSSML,
                     voice = selectedVoice,
+                    role = null,
                     speed = speed,
                     format = selectedFormat,
-                    lang = selectedLang,
-                    emotion = null,
                     token = TokenStorage.iamToken,
                 )
                 val filePath = saveAudioFile(audioBytes, selectedFormat)
@@ -243,43 +287,39 @@ private fun MainScreen(onTokenRefresh: () -> Unit) {
                 if (hasMarkers && detectedVoices.isNotEmpty()) {
                     VoiceMappingPanel(
                         voiceNames = detectedVoices.toList(),
-                        voiceEmotions = voiceEmotions,
+                        voiceRoles = voiceRoles,
                         mapping = voiceMapping,
                         onMappingChange = { name, apiVoice ->
                             voiceMapping[name] = apiVoice
                             saveVoiceMapping()
                         },
+                        onRetryVoice = { name ->
+                            launchMultiVoiceSynthesis(retryVoice = name)
+                        },
+                        isLoading = isLoading,
                         modifier = Modifier.width(280.dp).fillMaxHeight(),
                     )
                 }
             }
 
             // Controls row
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(16.dp),
-            ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Checkbox(checked = isSSML, onCheckedChange = { isSSML = it })
-                    Text("SSML")
-                }
-
-                if (!hasMarkers) {
+            if (!hasMarkers) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(16.dp),
+                ) {
                     DropdownSelector("Голос", API_VOICES, selectedVoice) { selectedVoice = it }
                     DropdownSelector("Формат", FORMATS, selectedFormat) { selectedFormat = it }
                 }
-                DropdownSelector("Язык", LANGUAGES, selectedLang) { selectedLang = it }
-            }
 
-            if (!hasMarkers) {
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
                     Text("Скорость: ${"%.1f".format(speed)}")
                     Slider(
-                        value = speed,
-                        onValueChange = { speed = it },
+                        value = speed.toFloat(),
+                        onValueChange = { speed = it.toDouble() },
                         valueRange = 0.1f..3.0f,
                         modifier = Modifier.width(200.dp),
                     )
@@ -293,11 +333,32 @@ private fun MainScreen(onTokenRefresh: () -> Unit) {
             ) {
                 Button(
                     onClick = {
-                        if (hasMarkers) launchMultiVoiceSynthesis() else launchSimpleSynthesis()
+                        if (hasMarkers) {
+                            clearCache()
+                            launchMultiVoiceSynthesis()
+                        } else {
+                            launchSimpleSynthesis()
+                        }
                     },
                     enabled = text.isNotBlank() && !isLoading && TokenStorage.hasCredentials(),
                 ) {
                     Text("Озвучить")
+                }
+
+                if (hasMarkers) {
+                    OutlinedButton(
+                        onClick = { launchMultiVoiceSynthesis() },
+                        enabled = text.isNotBlank() && !isLoading && TokenStorage.hasCredentials(),
+                    ) {
+                        Text("Повторить ошибки")
+                    }
+
+                    TextButton(
+                        onClick = { clearCache() },
+                        enabled = !isLoading,
+                    ) {
+                        Text("Очистить кэш")
+                    }
                 }
 
                 if (isLoading) {
@@ -324,9 +385,11 @@ private fun MainScreen(onTokenRefresh: () -> Unit) {
 @Composable
 private fun VoiceMappingPanel(
     voiceNames: List<String>,
-    voiceEmotions: Map<String, Set<String>>,
+    voiceRoles: Map<String, Set<String>>,
     mapping: Map<String, String>,
     onMappingChange: (name: String, apiVoice: String) -> Unit,
+    onRetryVoice: (name: String) -> Unit,
+    isLoading: Boolean,
     modifier: Modifier = Modifier,
 ) {
     Card(modifier = modifier) {
@@ -340,33 +403,57 @@ private fun VoiceMappingPanel(
             HorizontalDivider()
 
             voiceNames.forEach { name ->
-                val emotions = voiceEmotions[name]
+                val textRoles = voiceRoles[name]
+                val selectedApiVoice = mapping[name] ?: API_VOICES[0]
+                val apiVoiceInfo = API_VOICES_INFO.find { it.id == selectedApiVoice }
+
                 Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                         modifier = Modifier.fillMaxWidth(),
                     ) {
-                        Text(
-                            text = name,
-                            style = MaterialTheme.typography.bodyMedium,
-                            modifier = Modifier.weight(1f),
-                        )
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(text = name, style = MaterialTheme.typography.bodyMedium)
+                            if (!textRoles.isNullOrEmpty()) {
+                                Text(
+                                    text = "роли: ${textRoles.joinToString(", ")}",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                        }
                         DropdownSelector(
                             label = "",
                             items = API_VOICES,
-                            selected = mapping[name] ?: API_VOICES[0],
+                            selected = selectedApiVoice,
                             onSelect = { onMappingChange(name, it) }
                         )
                     }
-                    if (!emotions.isNullOrEmpty()) {
-                        Text(
-                            text = emotions.joinToString(", "),
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        if (apiVoiceInfo != null) {
+                            Text(
+                                text = "${apiVoiceInfo.gender}, ${apiVoiceInfo.roles.joinToString(", ")}",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.weight(1f),
+                            )
+                        } else {
+                            Spacer(Modifier.weight(1f))
+                        }
+                        TextButton(
+                            onClick = { onRetryVoice(name) },
+                            enabled = !isLoading,
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+                        ) {
+                            Text("Переозвучить", style = MaterialTheme.typography.bodySmall)
+                        }
                     }
                 }
+                HorizontalDivider()
             }
         }
     }

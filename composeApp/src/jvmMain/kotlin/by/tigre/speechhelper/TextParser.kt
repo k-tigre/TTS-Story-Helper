@@ -2,15 +2,15 @@ package by.tigre.speechhelper
 
 data class TextSegment(
     val voiceName: String,
-    val emotion: String?,
-    val speed: Float,
+    val role: String?,
+    val speed: Double,
     val text: String,
 )
 
 object TextParser {
 
     private val MARKER_REGEX = Regex(
-        """<!--\s*voice:\s*([^,]+?)(?:\s*,\s*emotion:\s*([^,]+?))?(?:\s*,\s*speed:\s*([^-]+?))?\s*-->"""
+        """<!--\s*voice:\s*([^,]+?)(?:\s*,\s*(?:role|emotion):\s*([^,]+?))?(?:\s*,\s*speed:\s*([^-]+?))?\s*-->"""
     )
 
     fun parse(input: String): List<TextSegment> {
@@ -18,8 +18,8 @@ object TextParser {
         val lines = input.lines()
 
         var currentVoice: String? = null
-        var currentEmotion: String? = null
-        var currentSpeed = 1.0f
+        var currentRole: String? = null
+        var currentSpeed = 1.0
         val currentText = StringBuilder()
 
         for (line in lines) {
@@ -28,13 +28,13 @@ object TextParser {
                 if (currentVoice != null) {
                     val text = currentText.toString().trim()
                     if (text.isNotBlank()) {
-                        segments.add(TextSegment(currentVoice, currentEmotion, currentSpeed, text))
+                        segments.add(TextSegment(currentVoice, currentRole, currentSpeed, stripSsmlTags(text)))
                     }
                     currentText.clear()
                 }
                 currentVoice = match.groupValues[1].trim()
-                currentEmotion = match.groupValues[2].trim().ifBlank { null }
-                currentSpeed = match.groupValues[3].trim().toFloatOrNull() ?: 1.0f
+                currentRole = match.groupValues[2].trim().ifBlank { null }
+                currentSpeed = match.groupValues[3].trim().toDoubleOrNull() ?: 1.0
             } else {
                 if (currentVoice != null) {
                     currentText.appendLine(line)
@@ -45,7 +45,7 @@ object TextParser {
         if (currentVoice != null) {
             val text = currentText.toString().trim()
             if (text.isNotBlank()) {
-                segments.add(TextSegment(currentVoice, currentEmotion, currentSpeed, text))
+                segments.add(TextSegment(currentVoice, currentRole, currentSpeed, stripSsmlTags(text)))
             }
         }
 
@@ -56,13 +56,13 @@ object TextParser {
         return MARKER_REGEX.findAll(input).map { it.groupValues[1].trim() }.toSet()
     }
 
-    fun extractVoiceEmotions(input: String): Map<String, Set<String>> {
+    fun extractVoiceRoles(input: String): Map<String, Set<String>> {
         val result = mutableMapOf<String, MutableSet<String>>()
         for (match in MARKER_REGEX.findAll(input)) {
             val voice = match.groupValues[1].trim()
-            val emotion = match.groupValues[2].trim()
-            if (emotion.isNotBlank()) {
-                result.getOrPut(voice) { mutableSetOf() }.add(emotion)
+            val role = match.groupValues[2].trim()
+            if (role.isNotBlank()) {
+                result.getOrPut(voice) { mutableSetOf() }.add(role)
             }
         }
         return result
@@ -70,5 +70,22 @@ object TextParser {
 
     fun hasVoiceMarkers(input: String): Boolean {
         return MARKER_REGEX.containsMatchIn(input)
+    }
+
+    private fun stripSsmlTags(text: String): String {
+        return text
+            .replace(Regex("""<break\s+[^>]*/>"""), " ")
+            .replace(Regex("""</?speak>"""), "")
+            .replace(Regex("""<prosody[^>]*>"""), "")
+            .replace(Regex("""</prosody>"""), "")
+            .replace(Regex("""<emphasis[^>]*>"""), "")
+            .replace(Regex("""</emphasis>"""), "")
+            .replace(Regex("""<phoneme[^>]*>"""), "")
+            .replace(Regex("""</phoneme>"""), "")
+            .replace(Regex("""</?s>"""), "")
+            .replace(Regex("""</?p>"""), "")
+            .replace(Regex("""<[^>]+>"""), "")
+            .replace(Regex("""\s+"""), " ")
+            .trim()
     }
 }
