@@ -6,13 +6,22 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
-import jdk.jfr.Enabled
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
+
+private val API_VOICES = listOf(
+    "alena", "filipp", "ermil", "jane", "madirus",
+    "omazh", "zahar", "dasha", "julia", "lera",
+    "masha", "marina", "alexander", "kirill", "anton",
+)
+
+private val LANGUAGES = listOf("ru-RU", "en-US", "kk-KK", "de-DE", "uz-UZ")
+
+private val FORMATS = listOf("oggopus", "mp3", "lpcm")
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -51,7 +60,7 @@ private fun TokenDialog(
                 OutlinedTextField(
                     value = token,
                     onValueChange = { token = it },
-                    label = { Text("IAM Token") },
+                    label = { Text("API Key") },
                     modifier = Modifier.fillMaxWidth(),
                     singleLine = true,
                 )
@@ -73,16 +82,6 @@ private fun TokenDialog(
     )
 }
 
-private val voices = listOf(
-    "alena", "filipp", "ermil", "jane", "madirus",
-    "omazh", "zahar", "dasha", "julia", "lera",
-    "masha", "marina", "alexander", "kirill", "anton",
-)
-
-private val languages = listOf("ru-RU", "en-US", "kk-KK", "de-DE", "uz-UZ")
-
-private val formats = listOf("oggopus", "mp3", "lpcm")
-
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun MainScreen(onTokenRefresh: () -> Unit) {
@@ -90,13 +89,65 @@ private fun MainScreen(onTokenRefresh: () -> Unit) {
 
     var text by remember { mutableStateOf("") }
     var isSSML by remember { mutableStateOf(false) }
-    var selectedVoice by remember { mutableStateOf(voices[0]) }
-    var selectedLang by remember { mutableStateOf(languages[0]) }
-    var selectedFormat by remember { mutableStateOf(formats[0]) }
+    var selectedVoice by remember { mutableStateOf(API_VOICES[0]) }
+    var selectedLang by remember { mutableStateOf(LANGUAGES[0]) }
+    var selectedFormat by remember { mutableStateOf(FORMATS[0]) }
     var speed by remember { mutableFloatStateOf(1.0f) }
 
     var isLoading by remember { mutableStateOf(false) }
+    var progressMessage by remember { mutableStateOf("") }
     var statusMessage by remember { mutableStateOf("") }
+
+    // Voice mapping: text voice name -> API voice name
+    var voiceMapping by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
+    var showVoiceMappingDialog by remember { mutableStateOf(false) }
+    var pendingSegments by remember { mutableStateOf<List<TextSegment>>(emptyList()) }
+
+    if (showVoiceMappingDialog) {
+        VoiceMappingDialog(
+            voiceNames = voiceMapping.keys.toList(),
+            currentMapping = voiceMapping,
+            onConfirm = { mapping ->
+                voiceMapping = mapping
+                showVoiceMappingDialog = false
+                // Launch synthesis with mapped voices
+                scope.launch {
+                    isLoading = true
+                    statusMessage = ""
+                    progressMessage = ""
+                    try {
+                        val audioParts = mutableListOf<ByteArray>()
+                        for ((index, segment) in pendingSegments.withIndex()) {
+                            val apiVoice = mapping[segment.voiceName] ?: API_VOICES[0]
+                            progressMessage = "Обработка ${index + 1} из ${pendingSegments.size} (${segment.voiceName} -> $apiVoice)..."
+                            val ssmlText = "<speak>${segment.text}</speak>"
+                            val bytes = SpeechKitApi.synthesize(
+                                text = ssmlText,
+                                isSSML = true,
+                                voice = apiVoice,
+                                speed = segment.speed,
+                                format = "mp3",
+                                lang = selectedLang,
+                                emotion = segment.emotion,
+                                token = TokenStorage.iamToken,
+                            )
+                            audioParts.add(bytes)
+                        }
+                        progressMessage = "Склейка аудио..."
+                        val combined = audioParts.reduce { acc, bytes -> acc + bytes }
+                        val filePath = saveAudioFile(combined, "mp3")
+                        statusMessage = "Сохранено (${pendingSegments.size} сегментов): $filePath"
+                    } catch (e: Exception) {
+                        statusMessage = "Ошибка: ${e.message}"
+                    } finally {
+                        isLoading = false
+                        progressMessage = ""
+                    }
+                }
+            },
+            onDismiss = { showVoiceMappingDialog = false }
+        )
+    }
 
     Scaffold(
         topBar = {
@@ -134,15 +185,16 @@ private fun MainScreen(onTokenRefresh: () -> Unit) {
                     Text("SSML")
                 }
 
-                if (isSSML.not()) {
-                    DropdownSelector("Голос", voices, selectedVoice) { selectedVoice = it }
-                }
+                val hasMarkers = TextParser.hasVoiceMarkers(text)
 
-                DropdownSelector("Язык", languages, selectedLang) { selectedLang = it }
-                DropdownSelector("Формат", formats, selectedFormat) { selectedFormat = it }
+                if (!hasMarkers) {
+                    DropdownSelector("Голос", API_VOICES, selectedVoice) { selectedVoice = it }
+                    DropdownSelector("Формат", FORMATS, selectedFormat) { selectedFormat = it }
+                }
+                DropdownSelector("Язык", LANGUAGES, selectedLang) { selectedLang = it }
             }
 
-            if (isSSML.not()) {
+            if (!TextParser.hasVoiceMarkers(text)) {
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -163,25 +215,45 @@ private fun MainScreen(onTokenRefresh: () -> Unit) {
             ) {
                 Button(
                     onClick = {
-                        scope.launch {
-                            isLoading = true
-                            statusMessage = ""
-                            try {
-                                val audioBytes = SpeechKitApi.synthesize(
-                                    text = text,
-                                    isSSML = isSSML,
-                                    voice = selectedVoice,
-                                    speed = speed,
-                                    format = selectedFormat,
-                                    lang = selectedLang,
-                                    token = TokenStorage.iamToken,
-                                )
-                                val filePath = saveAudioFile(audioBytes, selectedFormat)
-                                statusMessage = "Сохранено: $filePath"
-                            } catch (e: Exception) {
-                                statusMessage = "Ошибка: ${e.message}"
-                            } finally {
-                                isLoading = false
+                        val hasMarkers = TextParser.hasVoiceMarkers(text)
+                        if (hasMarkers) {
+                            val segments = TextParser.parse(text)
+                            if (segments.isEmpty()) {
+                                statusMessage = "Ошибка: не найдены сегменты текста"
+                                return@Button
+                            }
+                            pendingSegments = segments
+                            val names = segments.map { it.voiceName }.toSet()
+                            // Preserve existing mappings, add new names with default
+                            val newMapping = names.associateWith { name ->
+                                voiceMapping[name] ?: API_VOICES[0]
+                            }
+                            voiceMapping = newMapping
+                            showVoiceMappingDialog = true
+                        } else {
+                            scope.launch {
+                                isLoading = true
+                                statusMessage = ""
+                                progressMessage = "Синтез речи..."
+                                try {
+                                    val audioBytes = SpeechKitApi.synthesize(
+                                        text = if (isSSML) text else text,
+                                        isSSML = isSSML,
+                                        voice = selectedVoice,
+                                        speed = speed,
+                                        format = selectedFormat,
+                                        lang = selectedLang,
+                                        emotion = null,
+                                        token = TokenStorage.iamToken,
+                                    )
+                                    val filePath = saveAudioFile(audioBytes, selectedFormat)
+                                    statusMessage = "Сохранено: $filePath"
+                                } catch (e: Exception) {
+                                    statusMessage = "Ошибка: ${e.message}"
+                                } finally {
+                                    isLoading = false
+                                    progressMessage = ""
+                                }
                             }
                         }
                     },
@@ -192,6 +264,9 @@ private fun MainScreen(onTokenRefresh: () -> Unit) {
 
                 if (isLoading) {
                     CircularProgressIndicator(modifier = Modifier.size(24.dp))
+                    if (progressMessage.isNotBlank()) {
+                        Text(progressMessage, style = MaterialTheme.typography.bodySmall)
+                    }
                 }
             }
 
@@ -209,6 +284,60 @@ private fun MainScreen(onTokenRefresh: () -> Unit) {
 }
 
 @Composable
+private fun VoiceMappingDialog(
+    voiceNames: List<String>,
+    currentMapping: Map<String, String>,
+    onConfirm: (Map<String, String>) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val mapping = remember(voiceNames) {
+        mutableStateMapOf<String, String>().apply {
+            putAll(currentMapping)
+        }
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Соответствие голосов") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text(
+                    "Укажите API-голос для каждого персонажа:",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                voiceNames.forEach { name ->
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(12.dp),
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Text(
+                            text = name,
+                            modifier = Modifier.weight(1f),
+                            style = MaterialTheme.typography.bodyMedium,
+                        )
+                        DropdownSelector(
+                            label = "",
+                            items = API_VOICES,
+                            selected = mapping[name] ?: API_VOICES[0],
+                            onSelect = { mapping[name] = it }
+                        )
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            Button(onClick = { onConfirm(mapping.toMap()) }) {
+                Text("Озвучить")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Отмена") }
+        },
+    )
+}
+
+@Composable
 private fun DropdownSelector(
     label: String,
     items: List<String>,
@@ -219,7 +348,7 @@ private fun DropdownSelector(
 
     Box {
         OutlinedButton(onClick = { expanded = true }) {
-            Text("$label: $selected")
+            Text(if (label.isNotBlank()) "$label: $selected" else selected)
         }
         DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
             items.forEach { item ->
