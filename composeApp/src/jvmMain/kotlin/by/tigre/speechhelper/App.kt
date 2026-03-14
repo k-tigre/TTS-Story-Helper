@@ -1,6 +1,8 @@
 package by.tigre.speechhelper
 
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -87,7 +89,7 @@ private fun TokenDialog(
 private fun MainScreen(onTokenRefresh: () -> Unit) {
     val scope = rememberCoroutineScope()
 
-    var text by remember { mutableStateOf("") }
+    var text by remember { mutableStateOf(SessionStorage.text) }
     var isSSML by remember { mutableStateOf(false) }
     var selectedVoice by remember { mutableStateOf(API_VOICES[0]) }
     var selectedLang by remember { mutableStateOf(LANGUAGES[0]) }
@@ -98,55 +100,112 @@ private fun MainScreen(onTokenRefresh: () -> Unit) {
     var progressMessage by remember { mutableStateOf("") }
     var statusMessage by remember { mutableStateOf("") }
 
-    // Voice mapping: text voice name -> API voice name
-    var voiceMapping by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
-    var showVoiceMappingDialog by remember { mutableStateOf(false) }
-    var pendingSegments by remember { mutableStateOf<List<TextSegment>>(emptyList()) }
+    val voiceMapping = remember { mutableStateMapOf<String, String>() }
 
-    if (showVoiceMappingDialog) {
-        VoiceMappingDialog(
-            voiceNames = voiceMapping.keys.toList(),
-            currentMapping = voiceMapping,
-            onConfirm = { mapping ->
-                voiceMapping = mapping
-                showVoiceMappingDialog = false
-                // Launch synthesis with mapped voices
-                scope.launch {
-                    isLoading = true
-                    statusMessage = ""
-                    progressMessage = ""
-                    try {
-                        val audioParts = mutableListOf<ByteArray>()
-                        for ((index, segment) in pendingSegments.withIndex()) {
-                            val apiVoice = mapping[segment.voiceName] ?: API_VOICES[0]
-                            progressMessage = "Обработка ${index + 1} из ${pendingSegments.size} (${segment.voiceName} -> $apiVoice)..."
-                            val ssmlText = "<speak>${segment.text}</speak>"
-                            val bytes = SpeechKitApi.synthesize(
-                                text = ssmlText,
-                                isSSML = true,
-                                voice = apiVoice,
-                                speed = segment.speed,
-                                format = "mp3",
-                                lang = selectedLang,
-                                emotion = segment.emotion,
-                                token = TokenStorage.iamToken,
-                            )
-                            audioParts.add(bytes)
-                        }
-                        progressMessage = "Склейка аудио..."
-                        val combined = audioParts.reduce { acc, bytes -> acc + bytes }
-                        val filePath = saveAudioFile(combined, "mp3")
-                        statusMessage = "Сохранено (${pendingSegments.size} сегментов): $filePath"
-                    } catch (e: Exception) {
-                        statusMessage = "Ошибка: ${e.message}"
-                    } finally {
-                        isLoading = false
-                        progressMessage = ""
-                    }
+    // Load saved mapping on first composition
+    LaunchedEffect(Unit) {
+        val saved = SessionStorage.voiceMapping
+        voiceMapping.putAll(saved)
+    }
+
+    // Save text on change
+    LaunchedEffect(text) {
+        SessionStorage.text = text
+    }
+
+    val hasMarkers = TextParser.hasVoiceMarkers(text)
+    val detectedVoices: Set<String> = remember(text) {
+        if (hasMarkers) TextParser.extractVoiceNames(text) else emptySet()
+    }
+    val voiceEmotions: Map<String, Set<String>> = remember(text) {
+        if (hasMarkers) TextParser.extractVoiceEmotions(text) else emptyMap()
+    }
+
+    // Ensure all detected voices have a mapping
+    LaunchedEffect(detectedVoices) {
+        for (name in detectedVoices) {
+            if (name !in voiceMapping) {
+                voiceMapping[name] = API_VOICES[0]
+            }
+        }
+        // Remove stale mappings
+        val stale = voiceMapping.keys - detectedVoices
+        for (key in stale) {
+            voiceMapping.remove(key)
+        }
+    }
+
+    fun saveVoiceMapping() {
+        SessionStorage.voiceMapping = voiceMapping.toMap()
+    }
+
+    fun launchMultiVoiceSynthesis() {
+        val segments = TextParser.parse(text)
+        if (segments.isEmpty()) {
+            statusMessage = "Ошибка: не найдены сегменты текста"
+            return
+        }
+        saveVoiceMapping()
+        scope.launch {
+            isLoading = true
+            statusMessage = ""
+            progressMessage = ""
+            try {
+                val audioParts = mutableListOf<ByteArray>()
+                for ((index, segment) in segments.withIndex()) {
+                    val apiVoice = voiceMapping[segment.voiceName] ?: API_VOICES[0]
+                    progressMessage = "Обработка ${index + 1} из ${segments.size} (${segment.voiceName} -> $apiVoice)..."
+                    val ssmlText = "<speak>${segment.text}</speak>"
+                    val bytes = SpeechKitApi.synthesize(
+                        text = ssmlText,
+                        isSSML = true,
+                        voice = apiVoice,
+                        speed = segment.speed,
+                        format = "mp3",
+                        lang = selectedLang,
+                        emotion = segment.emotion,
+                        token = TokenStorage.iamToken,
+                    )
+                    audioParts.add(bytes)
                 }
-            },
-            onDismiss = { showVoiceMappingDialog = false }
-        )
+                progressMessage = "Склейка аудио..."
+                val combined = audioParts.reduce { acc, bytes -> acc + bytes }
+                val filePath = saveAudioFile(combined, "mp3")
+                statusMessage = "Сохранено (${segments.size} сегментов): $filePath"
+            } catch (e: Exception) {
+                statusMessage = "Ошибка: ${e.message}"
+            } finally {
+                isLoading = false
+                progressMessage = ""
+            }
+        }
+    }
+
+    fun launchSimpleSynthesis() {
+        scope.launch {
+            isLoading = true
+            statusMessage = ""
+            progressMessage = "Синтез речи..."
+            try {
+                val audioBytes = SpeechKitApi.synthesize(
+                    text = text,
+                    isSSML = isSSML,
+                    voice = selectedVoice,
+                    speed = speed,
+                    format = selectedFormat,
+                    lang = selectedLang,
+                    emotion = null,
+                    token = TokenStorage.iamToken,
+                )
+                val filePath = saveAudioFile(audioBytes, selectedFormat)
+                statusMessage = "Сохранено: $filePath"
+            } catch (e: Exception) {
+                statusMessage = "Ошибка: ${e.message}"
+            } finally {
+                isLoading = false
+                progressMessage = ""
+            }
+        }
     }
 
     Scaffold(
@@ -168,14 +227,34 @@ private fun MainScreen(onTokenRefresh: () -> Unit) {
                 .fillMaxSize(),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            OutlinedTextField(
-                value = text,
-                onValueChange = { text = it },
-                label = { Text("Текст для озвучивания") },
-                modifier = Modifier.fillMaxWidth().weight(1f),
-                minLines = 5,
-            )
+            // Main area: text + voice panel side by side
+            Row(
+                modifier = Modifier.weight(1f),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                OutlinedTextField(
+                    value = text,
+                    onValueChange = { text = it },
+                    label = { Text("Текст для озвучивания") },
+                    modifier = Modifier.weight(1f).fillMaxHeight(),
+                    minLines = 5,
+                )
 
+                if (hasMarkers && detectedVoices.isNotEmpty()) {
+                    VoiceMappingPanel(
+                        voiceNames = detectedVoices.toList(),
+                        voiceEmotions = voiceEmotions,
+                        mapping = voiceMapping,
+                        onMappingChange = { name, apiVoice ->
+                            voiceMapping[name] = apiVoice
+                            saveVoiceMapping()
+                        },
+                        modifier = Modifier.width(280.dp).fillMaxHeight(),
+                    )
+                }
+            }
+
+            // Controls row
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(16.dp),
@@ -185,8 +264,6 @@ private fun MainScreen(onTokenRefresh: () -> Unit) {
                     Text("SSML")
                 }
 
-                val hasMarkers = TextParser.hasVoiceMarkers(text)
-
                 if (!hasMarkers) {
                     DropdownSelector("Голос", API_VOICES, selectedVoice) { selectedVoice = it }
                     DropdownSelector("Формат", FORMATS, selectedFormat) { selectedFormat = it }
@@ -194,7 +271,7 @@ private fun MainScreen(onTokenRefresh: () -> Unit) {
                 DropdownSelector("Язык", LANGUAGES, selectedLang) { selectedLang = it }
             }
 
-            if (!TextParser.hasVoiceMarkers(text)) {
+            if (!hasMarkers) {
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -209,53 +286,14 @@ private fun MainScreen(onTokenRefresh: () -> Unit) {
                 }
             }
 
+            // Action row
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(12.dp),
             ) {
                 Button(
                     onClick = {
-                        val hasMarkers = TextParser.hasVoiceMarkers(text)
-                        if (hasMarkers) {
-                            val segments = TextParser.parse(text)
-                            if (segments.isEmpty()) {
-                                statusMessage = "Ошибка: не найдены сегменты текста"
-                                return@Button
-                            }
-                            pendingSegments = segments
-                            val names = segments.map { it.voiceName }.toSet()
-                            // Preserve existing mappings, add new names with default
-                            val newMapping = names.associateWith { name ->
-                                voiceMapping[name] ?: API_VOICES[0]
-                            }
-                            voiceMapping = newMapping
-                            showVoiceMappingDialog = true
-                        } else {
-                            scope.launch {
-                                isLoading = true
-                                statusMessage = ""
-                                progressMessage = "Синтез речи..."
-                                try {
-                                    val audioBytes = SpeechKitApi.synthesize(
-                                        text = if (isSSML) text else text,
-                                        isSSML = isSSML,
-                                        voice = selectedVoice,
-                                        speed = speed,
-                                        format = selectedFormat,
-                                        lang = selectedLang,
-                                        emotion = null,
-                                        token = TokenStorage.iamToken,
-                                    )
-                                    val filePath = saveAudioFile(audioBytes, selectedFormat)
-                                    statusMessage = "Сохранено: $filePath"
-                                } catch (e: Exception) {
-                                    statusMessage = "Ошибка: ${e.message}"
-                                } finally {
-                                    isLoading = false
-                                    progressMessage = ""
-                                }
-                            }
-                        }
+                        if (hasMarkers) launchMultiVoiceSynthesis() else launchSimpleSynthesis()
                     },
                     enabled = text.isNotBlank() && !isLoading && TokenStorage.hasCredentials(),
                 ) {
@@ -284,57 +322,54 @@ private fun MainScreen(onTokenRefresh: () -> Unit) {
 }
 
 @Composable
-private fun VoiceMappingDialog(
+private fun VoiceMappingPanel(
     voiceNames: List<String>,
-    currentMapping: Map<String, String>,
-    onConfirm: (Map<String, String>) -> Unit,
-    onDismiss: () -> Unit,
+    voiceEmotions: Map<String, Set<String>>,
+    mapping: Map<String, String>,
+    onMappingChange: (name: String, apiVoice: String) -> Unit,
+    modifier: Modifier = Modifier,
 ) {
-    val mapping = remember(voiceNames) {
-        mutableStateMapOf<String, String>().apply {
-            putAll(currentMapping)
-        }
-    }
+    Card(modifier = modifier) {
+        Column(
+            modifier = Modifier
+                .padding(12.dp)
+                .verticalScroll(rememberScrollState()),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Text("Голоса", style = MaterialTheme.typography.titleSmall)
+            HorizontalDivider()
 
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("Соответствие голосов") },
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                Text(
-                    "Укажите API-голос для каждого персонажа:",
-                    style = MaterialTheme.typography.bodySmall,
-                )
-                voiceNames.forEach { name ->
+            voiceNames.forEach { name ->
+                val emotions = voiceEmotions[name]
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(12.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
                         modifier = Modifier.fillMaxWidth(),
                     ) {
                         Text(
                             text = name,
-                            modifier = Modifier.weight(1f),
                             style = MaterialTheme.typography.bodyMedium,
+                            modifier = Modifier.weight(1f),
                         )
                         DropdownSelector(
                             label = "",
                             items = API_VOICES,
                             selected = mapping[name] ?: API_VOICES[0],
-                            onSelect = { mapping[name] = it }
+                            onSelect = { onMappingChange(name, it) }
+                        )
+                    }
+                    if (!emotions.isNullOrEmpty()) {
+                        Text(
+                            text = emotions.joinToString(", "),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
                 }
             }
-        },
-        confirmButton = {
-            Button(onClick = { onConfirm(mapping.toMap()) }) {
-                Text("Озвучить")
-            }
-        },
-        dismissButton = {
-            TextButton(onClick = onDismiss) { Text("Отмена") }
-        },
-    )
+        }
+    }
 }
 
 @Composable
