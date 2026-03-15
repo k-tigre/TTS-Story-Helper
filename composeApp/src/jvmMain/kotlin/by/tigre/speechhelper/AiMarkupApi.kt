@@ -7,9 +7,16 @@ import io.ktor.client.request.*
 import io.ktor.client.statement.*
 import io.ktor.http.*
 import io.ktor.serialization.kotlinx.json.*
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.flow
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
+
+sealed class MarkupResult {
+    data class InProgress(val message: String) : MarkupResult()
+    data class Done(val text: String) : MarkupResult()
+}
 
 @Serializable
 private data class ChatRequest(
@@ -84,28 +91,32 @@ object AiMarkupApi {
         return "$BASE_SYSTEM_PROMPT\n\nВ книге уже используются следующие голоса: $voicesList. Используй эти же имена голосов для разметки, не придумывай новые без необходимости."
     }
 
-    suspend fun autoMarkup(
+    fun autoMarkup(
         text: String,
         token: String,
         folderId: String,
         existingVoices: Set<String> = emptySet(),
-    ): String {
+    ): Flow<MarkupResult> = flow {
         val systemPrompt = buildSystemPrompt(existingVoices)
         val chunks = splitTextForAi(text)
         println("[AiMarkup] Текст разбит на ${chunks.size} чанк(ов), existingVoices=$existingVoices")
 
         if (chunks.size == 1) {
-            return requestMarkup(chunks[0], token, folderId, systemPrompt)
+            emit(MarkupResult.InProgress("Авто-разметка..."))
+            val result = requestMarkup(chunks[0], token, folderId, systemPrompt)
+            emit(MarkupResult.Done(result))
+            return@flow
         }
 
         val results = mutableListOf<String>()
         for ((i, chunk) in chunks.withIndex()) {
+            emit(MarkupResult.InProgress("Авто-разметка ${i + 1} из ${chunks.size}"))
             println("[AiMarkup] Обработка чанка ${i + 1}/${chunks.size} (${chunk.length} символов)")
             val result = requestMarkup(chunk, token, folderId, systemPrompt)
             results.add(result)
         }
         println("[AiMarkup] Все чанки обработаны")
-        return results.joinToString("\n")
+        emit(MarkupResult.Done(results.joinToString("\n")))
     }
 
     private val DIALOG_FIX_PROMPT = """
@@ -147,20 +158,23 @@ object AiMarkupApi {
         )
         println("[AiMarkup] Проход 1 завершён (${firstResult.length} символов)")
 
-        // Второй проход — исправление диалогов
-        println("[AiMarkup] Проход 2: исправление диалогов...")
-        val finalResult = sendChat(
-            model = model,
-            token = token,
-            messages = listOf(
-                ChatMessage(role = "system", content = systemPrompt),
-                ChatMessage(role = "user", content = text),
-                ChatMessage(role = "assistant", content = firstResult),
-                ChatMessage(role = "user", content = DIALOG_FIX_PROMPT),
-            ),
-        )
-        println("[AiMarkup] Проход 2 завершён (${finalResult.length} символов)")
-        return finalResult.replace("```", "")
+        // TODO: Второй проход временно отключён
+//        // Второй проход — исправление диалогов
+//        println("[AiMarkup] Проход 2: исправление диалогов...")
+//        val finalResult = sendChat(
+//            model = model,
+//            token = token,
+//            messages = listOf(
+//                ChatMessage(role = "system", content = systemPrompt),
+//                ChatMessage(role = "user", content = text),
+//                ChatMessage(role = "assistant", content = firstResult),
+//                ChatMessage(role = "user", content = DIALOG_FIX_PROMPT),
+//            ),
+//        )
+//        println("[AiMarkup] Проход 2 завершён (${finalResult.length} символов)")
+//        return finalResult.replace("```", "")
+
+        return firstResult.replace("```", "")
     }
 
     private suspend fun sendChat(
