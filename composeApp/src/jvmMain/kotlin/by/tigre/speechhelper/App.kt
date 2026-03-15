@@ -751,8 +751,8 @@ private fun MainScreen(onTokenRefresh: () -> Unit) {
     // Mutable segments for the breakdown view
     val segments = remember { mutableStateListOf<TextSegment>() }
 
-    // Sync segments from text when switching to segments view
-    LaunchedEffect(viewMode) {
+    // Sync segments from text when switching to segments view or changing chapter
+    LaunchedEffect(viewMode, currentChapterId) {
         if (viewMode == 1) {
             segments.clear()
             segments.addAll(TextParser.parse(text))
@@ -1096,6 +1096,10 @@ private fun MainScreen(onTokenRefresh: () -> Unit) {
                             saveVoiceMapping()
                             statusMessage = "Голос \"$fromName\" объединён с \"$toName\""
                         },
+                        onAddVoice = { name ->
+                            voiceMapping[name] = VoiceSettings()
+                            saveVoiceMapping()
+                        },
                         onCleanupVoices = { removeUnusedVoices() },
                         isLoading = isLoading,
                         modifier = Modifier.width(350.dp).fillMaxHeight(),
@@ -1433,11 +1437,44 @@ private fun VoiceMappingPanel(
     onSettingsChange: (name: String, settings: VoiceSettings) -> Unit,
     onRetryVoice: (name: String) -> Unit,
     onMergeVoice: (fromName: String, toName: String) -> Unit,
+    onAddVoice: (name: String) -> Unit,
     onCleanupVoices: () -> Unit,
     isLoading: Boolean,
     modifier: Modifier = Modifier,
 ) {
     val expandedVoices = remember { mutableStateMapOf<String, Boolean>() }
+    var showAddVoiceDialog by remember { mutableStateOf(false) }
+
+    if (showAddVoiceDialog) {
+        var newVoiceName by remember { mutableStateOf("") }
+        AlertDialog(
+            onDismissRequest = { showAddVoiceDialog = false },
+            title = { Text("Добавить голос") },
+            text = {
+                OutlinedTextField(
+                    value = newVoiceName,
+                    onValueChange = { newVoiceName = it },
+                    label = { Text("Имя голоса") },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        onAddVoice(newVoiceName.trim())
+                        showAddVoiceDialog = false
+                    },
+                    enabled = newVoiceName.trim().isNotBlank() && newVoiceName.trim() !in voiceNames,
+                ) {
+                    Text("Добавить")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showAddVoiceDialog = false }) { Text("Отмена") }
+            },
+        )
+    }
 
     Card(modifier = modifier) {
         Column(
@@ -1451,6 +1488,9 @@ private fun VoiceMappingPanel(
                 modifier = Modifier.fillMaxWidth(),
             ) {
                 Text("Голоса", style = MaterialTheme.typography.titleSmall, modifier = Modifier.weight(1f))
+                IconButton(onClick = { showAddVoiceDialog = true }) {
+                    Text("+", style = MaterialTheme.typography.titleMedium)
+                }
                 val hasUnused = voiceNames.any { it !in activeVoiceNames }
                 if (hasUnused) {
                     TextButton(
