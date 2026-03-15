@@ -2,17 +2,59 @@ package by.tigre.speechhelper
 
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.*
-import androidx.compose.runtime.*
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.Card
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.PrimaryTabRow
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Slider
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Tab
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.material3.TopAppBar
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.mutableStateMapOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
-import androidx.compose.runtime.snapshotFlow
+import androidx.compose.ui.window.Dialog
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.flow.debounce
@@ -317,6 +359,86 @@ private fun LoadBookDialog(
     )
 }
 
+@Composable
+private fun ProgressDialog(progressMessage: String) {
+    Dialog(onDismissRequest = {}) {
+        Surface(
+            shape = RoundedCornerShape(16.dp),
+            color = MaterialTheme.colorScheme.surface,
+            tonalElevation = 8.dp,
+        ) {
+            Column(
+                modifier = Modifier.padding(32.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(16.dp),
+            ) {
+                CircularProgressIndicator()
+                if (progressMessage.isNotBlank()) {
+                    Text(
+                        text = progressMessage,
+                        style = MaterialTheme.typography.bodyMedium,
+                        textAlign = TextAlign.Center,
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SplitSegmentDialog(
+    segmentText: String,
+    voiceName: String?,
+    onDismiss: () -> Unit,
+    onSplit: (parts: List<String>) -> Unit,
+) {
+    var editedText by remember { mutableStateOf(segmentText) }
+    val partsCount = editedText.split("===").count { it.trim().isNotBlank() }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Разбить сегмент") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(
+                    text = "Вставьте === в местах разбиения" +
+                            if (voiceName != null) "\nГолос: $voiceName (сохранится для всех частей)" else "",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                if (partsCount > 1) {
+                    Text(
+                        text = "Будет создано частей: $partsCount",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.primary,
+                    )
+                }
+                OutlinedTextField(
+                    value = editedText,
+                    onValueChange = { editedText = it },
+                    modifier = Modifier.fillMaxWidth().height(300.dp),
+                    minLines = 5,
+                )
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = {
+                    val parts = editedText.split("===").map { it.trim() }.filter { it.isNotBlank() }
+                    if (parts.size > 1) {
+                        onSplit(parts)
+                    }
+                },
+                enabled = partsCount > 1,
+            ) {
+                Text("Разбить ($partsCount)")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Отмена") }
+        },
+    )
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun ChapterSelector(
@@ -369,8 +491,10 @@ private fun ChapterSelector(
 
         if (chapters.size > 1) {
             IconButton(onClick = onDeleteChapter) {
-                Text("\u2716", style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.error)
+                Text(
+                    "\u2716", style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.error
+                )
             }
         }
     }
@@ -447,6 +571,10 @@ private fun MainScreen(onTokenRefresh: () -> Unit) {
         }
     }
 
+    fun saveVoiceMapping() {
+        SessionStorage.voiceMapping = voiceMapping.toMap()
+    }
+
     fun removeUnusedVoices() {
         val unused = voiceMapping.keys - detectedVoices
         for (name in unused) {
@@ -454,10 +582,6 @@ private fun MainScreen(onTokenRefresh: () -> Unit) {
         }
         saveVoiceMapping()
         statusMessage = if (unused.isEmpty()) "Нет неиспользуемых голосов" else "Удалено голосов: ${unused.size}"
-    }
-
-    fun saveVoiceMapping() {
-        SessionStorage.voiceMapping = voiceMapping.toMap()
     }
 
     fun launchAutoMarkup() {
@@ -524,7 +648,8 @@ private fun MainScreen(onTokenRefresh: () -> Unit) {
                         continue
                     }
 
-                    progressMessage = "Обработка ${index + 1} из ${segments.size} (${segment.voiceName ?: "по умолчанию"} -> ${settings.voice})..."
+                    progressMessage =
+                        "Обработка ${index + 1} из ${segments.size} (${segment.voiceName ?: "по умолчанию"} -> ${settings.voice})..."
                     try {
                         val bytes = SpeechKitApi.synthesize(
                             text = segment.text,
@@ -592,7 +717,8 @@ private fun MainScreen(onTokenRefresh: () -> Unit) {
                     token = TokenStorage.iamToken,
                 )
                 val chapterName = chapters.find { it.id == currentChapterId }?.name ?: ""
-                val filePath = saveAudioFile(audioBytes, selectedFormat, bookName = currentBookName, chapterName = chapterName)
+                val filePath =
+                    saveAudioFile(audioBytes, selectedFormat, bookName = currentBookName, chapterName = chapterName)
                 statusMessage = "Сохранено: $filePath"
             } catch (e: Exception) {
                 statusMessage = "Ошибка: ${e.message}"
@@ -855,6 +981,11 @@ private fun MainScreen(onTokenRefresh: () -> Unit) {
                         onSegmentTextChange = { index, newText ->
                             segments[index] = segments[index].copy(text = newText)
                         },
+                        onSplitSegment = { index, parts ->
+                            val voiceName = segments[index].voiceName
+                            segments.removeAt(index)
+                            segments.addAll(index, parts.map { TextSegment(voiceName = voiceName, text = it) })
+                        },
                         onRemarkupSegment = { index ->
                             val folderId = TokenStorage.folderId
                             if (folderId.isBlank()) {
@@ -917,6 +1048,29 @@ private fun MainScreen(onTokenRefresh: () -> Unit) {
                         },
                         onRetryVoice = { name ->
                             launchMultiVoiceSynthesis(retryVoice = name)
+                        },
+                        onMergeVoice = { fromName, toName ->
+                            // Rename in raw text
+                            text = text
+                                .replace("[$fromName]", "[$toName]")
+                                .replace("[/$fromName]", "[/$toName]")
+                            saveCurrentChapter()
+                            // Update segments if in segment view
+                            if (viewMode == 1) {
+                                for (i in segments.indices) {
+                                    if (segments[i].voiceName == fromName) {
+                                        segments[i] = segments[i].copy(voiceName = toName)
+                                    }
+                                }
+                            }
+                            // Remove old voice mapping
+                            voiceMapping.remove(fromName)
+                            // Ensure target voice has mapping
+                            if (toName !in voiceMapping) {
+                                voiceMapping[toName] = VoiceSettings()
+                            }
+                            saveVoiceMapping()
+                            statusMessage = "Голос \"$fromName\" объединён с \"$toName\""
                         },
                         onCleanupVoices = { removeUnusedVoices() },
                         isLoading = isLoading,
@@ -1021,12 +1175,6 @@ private fun MainScreen(onTokenRefresh: () -> Unit) {
                     }
                 }
 
-                if (isLoading) {
-                    CircularProgressIndicator(modifier = Modifier.size(24.dp))
-                    if (progressMessage.isNotBlank()) {
-                        Text(progressMessage, style = MaterialTheme.typography.bodySmall)
-                    }
-                }
             }
 
             if (statusMessage.isNotBlank()) {
@@ -1039,6 +1187,10 @@ private fun MainScreen(onTokenRefresh: () -> Unit) {
                 )
             }
         }
+
+        if (isLoading) {
+            ProgressDialog(progressMessage = progressMessage)
+        }
     }
 }
 
@@ -1048,12 +1200,27 @@ private fun SegmentsView(
     voiceMapping: Map<String, VoiceSettings>,
     onSegmentTextChange: (index: Int, newText: String) -> Unit,
     onRemarkupSegment: (index: Int) -> Unit,
+    onSplitSegment: (index: Int, parts: List<String>) -> Unit,
     isLoading: Boolean,
     modifier: Modifier = Modifier,
 ) {
     val scope = rememberCoroutineScope()
     var playingIndex by remember { mutableStateOf(-1) }
     var playError by remember { mutableStateOf<String?>(null) }
+    var splitDialogIndex by remember { mutableStateOf(-1) }
+
+    if (splitDialogIndex >= 0 && splitDialogIndex < segments.size) {
+        val seg = segments[splitDialogIndex]
+        SplitSegmentDialog(
+            segmentText = seg.text,
+            voiceName = seg.voiceName,
+            onDismiss = { splitDialogIndex = -1 },
+            onSplit = { parts ->
+                onSplitSegment(splitDialogIndex, parts)
+                splitDialogIndex = -1
+            },
+        )
+    }
 
     LazyColumn(
         modifier = modifier,
@@ -1109,15 +1276,27 @@ private fun SegmentsView(
                             modifier = Modifier.weight(1f),
                         )
 
-                        // Remarkup button
+                        // Split button
                         IconButton(
-                            onClick = { onRemarkupSegment(index) },
+                            onClick = { splitDialogIndex = index },
                             enabled = !isLoading && playingIndex == -1,
                         ) {
                             Text(
                                 "\u2702",
                                 style = MaterialTheme.typography.titleMedium,
                                 color = MaterialTheme.colorScheme.secondary,
+                            )
+                        }
+
+                        // Remarkup button
+                        IconButton(
+                            onClick = { onRemarkupSegment(index) },
+                            enabled = !isLoading && playingIndex == -1,
+                        ) {
+                            Text(
+                                "\u2728",
+                                style = MaterialTheme.typography.titleMedium,
+                                color = MaterialTheme.colorScheme.tertiary,
                             )
                         }
 
@@ -1190,6 +1369,7 @@ private fun VoiceMappingPanel(
     mapping: Map<String, VoiceSettings>,
     onSettingsChange: (name: String, settings: VoiceSettings) -> Unit,
     onRetryVoice: (name: String) -> Unit,
+    onMergeVoice: (fromName: String, toName: String) -> Unit,
     onCleanupVoices: () -> Unit,
     isLoading: Boolean,
     modifier: Modifier = Modifier,
@@ -1322,16 +1502,53 @@ private fun VoiceMappingPanel(
                                 Text("Тон: $pitchSummary", style = MaterialTheme.typography.bodySmall)
                                 Slider(
                                     value = settings.pitchShift.toFloat(),
-                                    onValueChange = { onSettingsChange(name, settings.copy(pitchShift = it.toDouble())) },
+                                    onValueChange = {
+                                        onSettingsChange(
+                                            name,
+                                            settings.copy(pitchShift = it.toDouble())
+                                        )
+                                    },
                                     valueRange = -1000f..1000f,
                                     modifier = Modifier.weight(1f),
                                 )
                             }
 
                             Row(
-                                horizontalArrangement = Arrangement.End,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalAlignment = Alignment.CenterVertically,
                                 modifier = Modifier.fillMaxWidth(),
                             ) {
+                                // Merge into another voice
+                                val otherVoices = voiceNames.filter { it != name }
+                                if (otherVoices.isNotEmpty()) {
+                                    var mergeExpanded by remember { mutableStateOf(false) }
+                                    Box {
+                                        TextButton(
+                                            onClick = { mergeExpanded = true },
+                                            enabled = !isLoading,
+                                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+                                        ) {
+                                            Text("Объединить с...", style = MaterialTheme.typography.bodySmall)
+                                        }
+                                        DropdownMenu(
+                                            expanded = mergeExpanded,
+                                            onDismissRequest = { mergeExpanded = false },
+                                        ) {
+                                            otherVoices.forEach { target ->
+                                                DropdownMenuItem(
+                                                    text = { Text(target) },
+                                                    onClick = {
+                                                        mergeExpanded = false
+                                                        onMergeVoice(name, target)
+                                                    },
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
+
+                                Box(modifier = Modifier.weight(1f))
+
                                 TextButton(
                                     onClick = { onRetryVoice(name) },
                                     enabled = !isLoading,
@@ -1378,7 +1595,12 @@ private fun DropdownSelector(
     }
 }
 
-private suspend fun saveAudioFile(bytes: ByteArray, format: String, bookName: String = "", chapterName: String = ""): String {
+private suspend fun saveAudioFile(
+    bytes: ByteArray,
+    format: String,
+    bookName: String = "",
+    chapterName: String = ""
+): String {
     return withContext(Dispatchers.IO) {
         val ext = when (format) {
             "oggopus" -> "ogg"
