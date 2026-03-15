@@ -1,5 +1,7 @@
 package by.tigre.speechhelper
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -17,14 +19,30 @@ import java.time.format.DateTimeFormatter
 
 data class VoiceInfo(val id: String, val gender: String, val roles: List<String>)
 
+data class VoiceSettings(
+    val voice: String = "dasha",
+    val role: String = "",
+    val speed: Double = 1.0,
+    val pitchShift: Double = 0.0,
+)
+
 private val API_VOICES_INFO = listOf(
+    // Russian (ru-RU)
+    VoiceInfo("alena", "Ж", listOf("neutral", "good")),
+    VoiceInfo("filipp", "М", emptyList()),
+    VoiceInfo("ermil", "М", listOf("neutral", "good")),
+    VoiceInfo("jane", "Ж", listOf("neutral", "good", "evil")),
+    VoiceInfo("omazh", "Ж", listOf("neutral", "evil")),
+    VoiceInfo("zahar", "М", listOf("neutral", "good")),
     VoiceInfo("dasha", "Ж", listOf("neutral", "good", "friendly")),
     VoiceInfo("julia", "Ж", listOf("neutral", "strict")),
     VoiceInfo("lera", "Ж", listOf("neutral", "friendly")),
     VoiceInfo("masha", "Ж", listOf("good", "strict", "friendly")),
+    VoiceInfo("marina", "Ж", listOf("neutral", "whisper", "friendly")),
     VoiceInfo("alexander", "М", listOf("neutral", "good")),
     VoiceInfo("kirill", "М", listOf("neutral", "strict", "good")),
     VoiceInfo("anton", "М", listOf("neutral", "good")),
+    VoiceInfo("madi_ru", "М", emptyList()),
     VoiceInfo("saule_ru", "Ж", listOf("neutral", "strict", "whisper")),
     VoiceInfo("zamira_ru", "Ж", listOf("neutral", "strict", "friendly")),
     VoiceInfo("zhanar_ru", "Ж", listOf("neutral", "strict", "friendly")),
@@ -103,12 +121,14 @@ private fun MainScreen(onTokenRefresh: () -> Unit) {
     var selectedVoice by remember { mutableStateOf(API_VOICES[0]) }
     var selectedFormat by remember { mutableStateOf(FORMATS[0]) }
     var speed by remember { mutableStateOf(1.0) }
+    var pitchShift by remember { mutableStateOf(0.0) }
+    var selectedRole by remember { mutableStateOf("") }
 
     var isLoading by remember { mutableStateOf(false) }
     var progressMessage by remember { mutableStateOf("") }
     var statusMessage by remember { mutableStateOf("") }
 
-    val voiceMapping = remember { mutableStateMapOf<String, String>() }
+    val voiceMapping = remember { mutableStateMapOf<String, VoiceSettings>() }
 
     // Load saved mapping on first composition
     LaunchedEffect(Unit) {
@@ -130,7 +150,7 @@ private fun MainScreen(onTokenRefresh: () -> Unit) {
     LaunchedEffect(detectedVoices) {
         for (name in detectedVoices) {
             if (name !in voiceMapping) {
-                voiceMapping[name] = API_VOICES[0]
+                voiceMapping[name] = VoiceSettings()
             }
         }
         // Remove stale mappings
@@ -162,10 +182,10 @@ private fun MainScreen(onTokenRefresh: () -> Unit) {
                 val errors = mutableListOf<String>()
 
                 for ((index, segment) in segments.withIndex()) {
-                    val apiVoice = if (segment.voiceName != null) {
-                        voiceMapping[segment.voiceName] ?: API_VOICES[0]
+                    val settings = if (segment.voiceName != null) {
+                        voiceMapping[segment.voiceName] ?: VoiceSettings()
                     } else {
-                        API_VOICES[0]
+                        VoiceSettings()
                     }
                     val partFile = File(cacheDir, "part_%03d.mp3".format(index))
 
@@ -175,13 +195,14 @@ private fun MainScreen(onTokenRefresh: () -> Unit) {
                         continue
                     }
 
-                    progressMessage = "Обработка ${index + 1} из ${segments.size} (${segment.voiceName ?: "по умолчанию"} -> $apiVoice)..."
+                    progressMessage = "Обработка ${index + 1} из ${segments.size} (${segment.voiceName ?: "по умолчанию"} -> ${settings.voice})..."
                     try {
                         val bytes = SpeechKitApi.synthesize(
                             text = segment.text,
-                            voice = apiVoice,
-                            role = null,
-                            speed = 1.0,
+                            voice = settings.voice,
+                            role = settings.role.ifBlank { null },
+                            speed = settings.speed,
+                            pitchShift = settings.pitchShift,
                             format = "mp3",
                             token = TokenStorage.iamToken,
                         )
@@ -237,8 +258,9 @@ private fun MainScreen(onTokenRefresh: () -> Unit) {
                 val audioBytes = SpeechKitApi.synthesize(
                     text = text,
                     voice = selectedVoice,
-                    role = null,
+                    role = selectedRole.ifBlank { null },
                     speed = speed,
+                    pitchShift = pitchShift,
                     format = selectedFormat,
                     token = TokenStorage.iamToken,
                 )
@@ -289,38 +311,64 @@ private fun MainScreen(onTokenRefresh: () -> Unit) {
                     VoiceMappingPanel(
                         voiceNames = detectedVoices.toList(),
                         mapping = voiceMapping,
-                        onMappingChange = { name, apiVoice ->
-                            voiceMapping[name] = apiVoice
+                        onSettingsChange = { name, settings ->
+                            voiceMapping[name] = settings
                             saveVoiceMapping()
                         },
                         onRetryVoice = { name ->
                             launchMultiVoiceSynthesis(retryVoice = name)
                         },
                         isLoading = isLoading,
-                        modifier = Modifier.width(280.dp).fillMaxHeight(),
+                        modifier = Modifier.width(350.dp).fillMaxHeight(),
                     )
                 }
             }
 
             // Controls row
             if (!hasMarkers) {
+                val currentVoiceInfo = API_VOICES_INFO.find { it.id == selectedVoice }
+                val availableRoles = currentVoiceInfo?.roles ?: emptyList()
+
+                // Reset role if not available for this voice
+                LaunchedEffect(selectedVoice) {
+                    if (selectedRole.isNotBlank() && selectedRole !in availableRoles) {
+                        selectedRole = ""
+                    }
+                }
+
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(16.dp),
                 ) {
                     DropdownSelector("Голос", API_VOICES, selectedVoice) { selectedVoice = it }
                     DropdownSelector("Формат", FORMATS, selectedFormat) { selectedFormat = it }
+                    if (availableRoles.isNotEmpty()) {
+                        DropdownSelector(
+                            "Амплуа",
+                            listOf("") + availableRoles,
+                            selectedRole,
+                            displayTransform = { it.ifBlank { "нет" } }
+                        ) { selectedRole = it }
+                    }
                 }
 
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    horizontalArrangement = Arrangement.spacedBy(16.dp),
                 ) {
                     Text("Скорость: ${"%.1f".format(speed)}")
                     Slider(
                         value = speed.toFloat(),
                         onValueChange = { speed = it.toDouble() },
                         valueRange = 0.1f..3.0f,
+                        modifier = Modifier.width(200.dp),
+                    )
+
+                    Text("Тон: ${"%.0f".format(pitchShift)}")
+                    Slider(
+                        value = pitchShift.toFloat(),
+                        onValueChange = { pitchShift = it.toDouble() },
+                        valueRange = -1000f..1000f,
                         modifier = Modifier.width(200.dp),
                     )
                 }
@@ -385,54 +433,139 @@ private fun MainScreen(onTokenRefresh: () -> Unit) {
 @Composable
 private fun VoiceMappingPanel(
     voiceNames: List<String>,
-    mapping: Map<String, String>,
-    onMappingChange: (name: String, apiVoice: String) -> Unit,
+    mapping: Map<String, VoiceSettings>,
+    onSettingsChange: (name: String, settings: VoiceSettings) -> Unit,
     onRetryVoice: (name: String) -> Unit,
     isLoading: Boolean,
     modifier: Modifier = Modifier,
 ) {
+    val expandedVoices = remember { mutableStateMapOf<String, Boolean>() }
+
     Card(modifier = modifier) {
         Column(
             modifier = Modifier
                 .padding(12.dp)
                 .verticalScroll(rememberScrollState()),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
         ) {
             Text("Голоса", style = MaterialTheme.typography.titleSmall)
             HorizontalDivider()
 
             voiceNames.forEach { name ->
-                val selectedApiVoice = mapping[name] ?: API_VOICES[0]
+                val settings = mapping[name] ?: VoiceSettings()
+                val expanded = expandedVoices[name] ?: false
+                val voiceInfo = API_VOICES_INFO.find { it.id == settings.voice }
+                val availableRoles = voiceInfo?.roles ?: emptyList()
 
-                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                // Compact summary (always visible, clickable to toggle)
+                val roleSummary = settings.role.ifBlank { "-" }
+                val speedSummary = "%.1f".format(settings.speed)
+                val pitchSummary = "%.0f".format(settings.pitchShift)
+                val genderIcon = voiceInfo?.gender ?: "?"
+
+                Column {
+                    // Collapsed header
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        modifier = Modifier.fillMaxWidth(),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { expandedVoices[name] = !expanded }
+                            .padding(vertical = 4.dp),
                     ) {
+                        Text(
+                            text = if (expanded) "\u25BC" else "\u25B6",
+                            style = MaterialTheme.typography.bodySmall,
+                            modifier = Modifier.width(16.dp),
+                        )
                         Text(
                             text = name,
                             style = MaterialTheme.typography.bodyMedium,
                             modifier = Modifier.weight(1f),
                         )
-                        DropdownSelector(
-                            label = "",
-                            items = API_VOICES,
-                            selected = selectedApiVoice,
-                            onSelect = { onMappingChange(name, it) }
+                        Text(
+                            text = "${settings.voice}($genderIcon) | $roleSummary | x$speedSummary | ${pitchSummary}Hz",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    ) {
-                        Spacer(Modifier.weight(1f))
-                        TextButton(
-                            onClick = { onRetryVoice(name) },
-                            enabled = !isLoading,
-                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+
+                    // Expanded editor
+                    AnimatedVisibility(visible = expanded) {
+                        Column(
+                            modifier = Modifier.padding(start = 16.dp),
+                            verticalArrangement = Arrangement.spacedBy(4.dp),
                         ) {
-                            Text("Переозвучить", style = MaterialTheme.typography.bodySmall)
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            ) {
+                                Text("Голос:", style = MaterialTheme.typography.bodySmall)
+                                DropdownSelector(
+                                    label = "",
+                                    items = API_VOICES,
+                                    selected = settings.voice,
+                                    onSelect = { voice ->
+                                        val newRoles = API_VOICES_INFO.find { it.id == voice }?.roles ?: emptyList()
+                                        val newRole = if (settings.role in newRoles) settings.role else ""
+                                        onSettingsChange(name, settings.copy(voice = voice, role = newRole))
+                                    }
+                                )
+                            }
+
+                            if (availableRoles.isNotEmpty()) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                ) {
+                                    Text("Амплуа:", style = MaterialTheme.typography.bodySmall)
+                                    DropdownSelector(
+                                        label = "",
+                                        items = listOf("") + availableRoles,
+                                        selected = settings.role,
+                                        displayTransform = { it.ifBlank { "нет" } },
+                                        onSelect = { onSettingsChange(name, settings.copy(role = it)) }
+                                    )
+                                }
+                            }
+
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                            ) {
+                                Text("Скорость: $speedSummary", style = MaterialTheme.typography.bodySmall)
+                                Slider(
+                                    value = settings.speed.toFloat(),
+                                    onValueChange = { onSettingsChange(name, settings.copy(speed = it.toDouble())) },
+                                    valueRange = 0.1f..3.0f,
+                                    modifier = Modifier.weight(1f),
+                                )
+                            }
+
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                            ) {
+                                Text("Тон: $pitchSummary", style = MaterialTheme.typography.bodySmall)
+                                Slider(
+                                    value = settings.pitchShift.toFloat(),
+                                    onValueChange = { onSettingsChange(name, settings.copy(pitchShift = it.toDouble())) },
+                                    valueRange = -1000f..1000f,
+                                    modifier = Modifier.weight(1f),
+                                )
+                            }
+
+                            Row(
+                                horizontalArrangement = Arrangement.End,
+                                modifier = Modifier.fillMaxWidth(),
+                            ) {
+                                TextButton(
+                                    onClick = { onRetryVoice(name) },
+                                    enabled = !isLoading,
+                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+                                ) {
+                                    Text("Переозвучить", style = MaterialTheme.typography.bodySmall)
+                                }
+                            }
                         }
                     }
                 }
@@ -447,18 +580,20 @@ private fun DropdownSelector(
     label: String,
     items: List<String>,
     selected: String,
+    displayTransform: (String) -> String = { it },
     onSelect: (String) -> Unit,
 ) {
     var expanded by remember { mutableStateOf(false) }
 
     Box {
         OutlinedButton(onClick = { expanded = true }) {
-            Text(if (label.isNotBlank()) "$label: $selected" else selected)
+            val display = displayTransform(selected)
+            Text(if (label.isNotBlank()) "$label: $display" else display)
         }
         DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
             items.forEach { item ->
                 DropdownMenuItem(
-                    text = { Text(item) },
+                    text = { Text(displayTransform(item)) },
                     onClick = {
                         onSelect(item)
                         expanded = false
