@@ -468,6 +468,7 @@ private fun MainScreen(onTokenRefresh: () -> Unit) {
                         text = text,
                         token = TokenStorage.iamToken,
                         folderId = folderId,
+                        existingVoices = voiceMapping.keys.toSet(),
                     )
                 }
                 text = result
