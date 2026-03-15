@@ -47,9 +47,9 @@ object TextParser {
     }
 
     fun buildText(segments: List<TextSegment>): String {
-        return segments.joinToString("\n") { segment ->
+        return segments.joinToString("\n\n") { segment ->
             if (segment.voiceName != null) {
-                "[${segment.voiceName}]${segment.text}[/${segment.voiceName}]"
+                "[${segment.voiceName}]\n${segment.text}\n[/${segment.voiceName}]"
             } else {
                 segment.text
             }
