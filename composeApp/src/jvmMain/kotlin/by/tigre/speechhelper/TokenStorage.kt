@@ -6,7 +6,7 @@ object TokenStorage {
     private val prefs: Preferences = Preferences.userNodeForPackage(TokenStorage::class.java)
 
     private const val KEY_IAM_TOKEN = "iam_token"
-    private const val KEY_FOLDER_ID = "folder_id"
+    private const val KEY_FOLDER_ID = "folder_id_id"
 
     var iamToken: String
         get() = prefs.get(KEY_IAM_TOKEN, "")
