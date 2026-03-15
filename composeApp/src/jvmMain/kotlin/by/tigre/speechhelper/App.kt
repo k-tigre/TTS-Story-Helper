@@ -57,6 +57,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.FlowPreview
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -596,17 +597,21 @@ private fun MainScreen(onTokenRefresh: () -> Unit) {
         statusMessage = ""
         scope.launch {
             try {
-                val result = withContext(Dispatchers.IO) {
-                    AiMarkupApi.autoMarkup(
-                        text = text,
-                        token = TokenStorage.iamToken,
-                        folderId = folderId,
-                        existingVoices = voiceMapping.keys.toSet(),
-                    )
+                AiMarkupApi.autoMarkup(
+                    text = text,
+                    token = TokenStorage.iamToken,
+                    folderId = folderId,
+                    existingVoices = voiceMapping.keys.toSet(),
+                ).collectLatest { result ->
+                    when (result) {
+                        is MarkupResult.InProgress -> progressMessage = result.message
+                        is MarkupResult.Done -> {
+                            text = result.text
+                            saveCurrentChapter()
+                            statusMessage = "Авто-разметка завершена"
+                        }
+                    }
                 }
-                text = result
-                saveCurrentChapter()
-                statusMessage = "Авто-разметка завершена"
             } catch (e: Exception) {
                 statusMessage = "Ошибка авто-разметки: ${e.message}"
                 e.printStackTrace()
@@ -644,12 +649,12 @@ private fun MainScreen(onTokenRefresh: () -> Unit) {
 
                     // Skip already cached unless retrying this voice
                     if (partFile.exists() && (retryVoice == null || segment.voiceName != retryVoice)) {
-                        progressMessage = "Часть ${index + 1} из ${segments.size} — кэш"
+                        progressMessage = "Озвучивание ${index + 1} из ${segments.size} — кэш"
                         continue
                     }
 
                     progressMessage =
-                        "Обработка ${index + 1} из ${segments.size} (${segment.voiceName ?: "по умолчанию"} -> ${settings.voice})..."
+                        "Озвучивание ${index + 1} из ${segments.size}\nголос: ${segment.voiceName ?: "по умолчанию"} → ${settings.voice}"
                     try {
                         val bytes = SpeechKitApi.synthesize(
                             text = segment.text,
@@ -669,7 +674,7 @@ private fun MainScreen(onTokenRefresh: () -> Unit) {
                 }
 
                 // Assemble all available parts in order
-                progressMessage = "Склейка аудио..."
+                progressMessage = "Склейка аудио\n${segments.size} сегментов"
                 val allParts = (0 until segments.size).mapNotNull { i ->
                     val f = File(cacheDir, "part_%03d.mp3".format(i))
                     if (f.exists()) f.readBytes() else null
@@ -705,7 +710,7 @@ private fun MainScreen(onTokenRefresh: () -> Unit) {
         scope.launch {
             isLoading = true
             statusMessage = ""
-            progressMessage = "Синтез речи..."
+            progressMessage = "Синтез речи\nголос: $selectedVoice"
             try {
                 val audioBytes = SpeechKitApi.synthesize(
                     text = text,
@@ -992,32 +997,36 @@ private fun MainScreen(onTokenRefresh: () -> Unit) {
                                 showFolderIdDialog = true
                             } else if (!isLoading) {
                                 isLoading = true
-                                progressMessage = "Переразметка сегмента ${index + 1}..."
                                 scope.launch {
                                     try {
                                         val segmentText = segments[index].text
-                                        val result = withContext(Dispatchers.IO) {
-                                            AiMarkupApi.autoMarkup(
-                                                text = segmentText,
-                                                token = TokenStorage.iamToken,
-                                                folderId = folderId,
-                                                existingVoices = voiceMapping.keys.toSet(),
-                                            )
-                                        }
-                                        val newSegments = TextParser.parse(result)
-                                        if (newSegments.isNotEmpty()) {
-                                            segments.removeAt(index)
-                                            segments.addAll(index, newSegments)
-                                            // Ensure new voices have mappings
-                                            for (seg in newSegments) {
-                                                val name = seg.voiceName ?: continue
-                                                if (name !in voiceMapping) {
-                                                    voiceMapping[name] = VoiceSettings()
+                                        AiMarkupApi.autoMarkup(
+                                            text = segmentText,
+                                            token = TokenStorage.iamToken,
+                                            folderId = folderId,
+                                            existingVoices = voiceMapping.keys.toSet(),
+                                        ).collectLatest { result ->
+                                            when (result) {
+                                                is MarkupResult.InProgress ->
+                                                    progressMessage = "Переразметка сегмента ${index + 1}\n${result.message}"
+
+                                                is MarkupResult.Done -> {
+                                                    val newSegments = TextParser.parse(result.text)
+                                                    if (newSegments.isNotEmpty()) {
+                                                        segments.removeAt(index)
+                                                        segments.addAll(index, newSegments)
+                                                        for (seg in newSegments) {
+                                                            val name = seg.voiceName ?: continue
+                                                            if (name !in voiceMapping) {
+                                                                voiceMapping[name] = VoiceSettings()
+                                                            }
+                                                        }
+                                                        statusMessage = "Сегмент переразмечен: ${newSegments.size} частей"
+                                                    } else {
+                                                        statusMessage = "Авто-разметка не вернула результат"
+                                                    }
                                                 }
                                             }
-                                            statusMessage = "Сегмент переразмечен: ${newSegments.size} частей"
-                                        } else {
-                                            statusMessage = "Авто-разметка не вернула результат"
                                         }
                                     } catch (e: Exception) {
                                         statusMessage = "Ошибка переразметки: ${e.message}"
