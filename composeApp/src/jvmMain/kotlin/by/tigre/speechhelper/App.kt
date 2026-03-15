@@ -846,6 +846,49 @@ private fun MainScreen(onTokenRefresh: () -> Unit) {
                         onSegmentTextChange = { index, newText ->
                             segments[index] = segments[index].copy(text = newText)
                         },
+                        onRemarkupSegment = { index ->
+                            val folderId = TokenStorage.folderId
+                            if (folderId.isBlank()) {
+                                showFolderIdDialog = true
+                            } else if (!isLoading) {
+                                isLoading = true
+                                progressMessage = "Переразметка сегмента ${index + 1}..."
+                                scope.launch {
+                                    try {
+                                        val segmentText = segments[index].text
+                                        val result = withContext(Dispatchers.IO) {
+                                            AiMarkupApi.autoMarkup(
+                                                text = segmentText,
+                                                token = TokenStorage.iamToken,
+                                                folderId = folderId,
+                                                existingVoices = voiceMapping.keys.toSet(),
+                                            )
+                                        }
+                                        val newSegments = TextParser.parse(result)
+                                        if (newSegments.isNotEmpty()) {
+                                            segments.removeAt(index)
+                                            segments.addAll(index, newSegments)
+                                            // Ensure new voices have mappings
+                                            for (seg in newSegments) {
+                                                val name = seg.voiceName ?: continue
+                                                if (name !in voiceMapping) {
+                                                    voiceMapping[name] = VoiceSettings()
+                                                }
+                                            }
+                                            statusMessage = "Сегмент переразмечен: ${newSegments.size} частей"
+                                        } else {
+                                            statusMessage = "Авто-разметка не вернула результат"
+                                        }
+                                    } catch (e: Exception) {
+                                        statusMessage = "Ошибка переразметки: ${e.message}"
+                                        e.printStackTrace()
+                                    } finally {
+                                        isLoading = false
+                                        progressMessage = ""
+                                    }
+                                }
+                            }
+                        },
                         isLoading = isLoading,
                         modifier = Modifier.weight(1f),
                     )
@@ -994,6 +1037,7 @@ private fun SegmentsView(
     segments: List<TextSegment>,
     voiceMapping: Map<String, VoiceSettings>,
     onSegmentTextChange: (index: Int, newText: String) -> Unit,
+    onRemarkupSegment: (index: Int) -> Unit,
     isLoading: Boolean,
     modifier: Modifier = Modifier,
 ) {
@@ -1054,6 +1098,18 @@ private fun SegmentsView(
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             modifier = Modifier.weight(1f),
                         )
+
+                        // Remarkup button
+                        IconButton(
+                            onClick = { onRemarkupSegment(index) },
+                            enabled = !isLoading && playingIndex == -1,
+                        ) {
+                            Text(
+                                "\u2702",
+                                style = MaterialTheme.typography.titleMedium,
+                                color = MaterialTheme.colorScheme.secondary,
+                            )
+                        }
 
                         // Play button
                         if (isPlaying) {
