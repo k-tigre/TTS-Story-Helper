@@ -11,6 +11,7 @@ object SessionStorage {
     private val chaptersDir = File(dir, "chapters").apply { mkdirs() }
     private val currentChapterFile = File(dir, "current_chapter.txt")
     private val mappingFile = File(dir, "voice_mapping.txt")
+    private val currentBookFile = File(dir, "current_book.txt")
 
     init {
         migrateIfNeeded()
@@ -78,6 +79,13 @@ object SessionStorage {
     var currentChapterId: String?
         get() = currentChapterFile.takeIf { it.exists() }?.readText()?.trim()?.ifBlank { null }
         set(value) = if (value != null) currentChapterFile.writeText(value) else currentChapterFile.delete().let {}
+
+    var currentBookName: String
+        get() = currentBookFile.takeIf { it.exists() }?.readText()?.trim() ?: ""
+        set(value) {
+            if (value.isNotBlank()) currentBookFile.writeText(value)
+            else if (currentBookFile.exists()) currentBookFile.delete()
+        }
 
     fun ensureCurrentChapter(): String {
         var id = currentChapterId
@@ -267,5 +275,7 @@ object SessionStorage {
         if (mappingFile.exists()) mappingFile.delete()
         // Clear current chapter
         if (currentChapterFile.exists()) currentChapterFile.delete()
+        // Clear current book name
+        if (currentBookFile.exists()) currentBookFile.delete()
     }
 }
