@@ -104,19 +104,65 @@ object AiMarkupApi {
         return results.joinToString("\n")
     }
 
+    private val DIALOG_FIX_PROMPT = """
+Проверь размеченный текст. Убедись, что в диалогах слова автора (например "сказал он", "ответила она", "пробормотал он, отступая") вынесены в голос рассказчика, а не произносятся голосом персонажа.
+
+Пример НЕПРАВИЛЬНОЙ разметки:
+[voice_actor]
+— Я не понимаю, о чём вы, — пробормотал он, отступая на шаг.
+[/voice_actor]
+
+Пример ПРАВИЛЬНОЙ разметки:
+[voice_actor]
+— Я не понимаю, о чём вы, —
+[/voice_actor]
+[voice_main]
+пробормотал он, отступая на шаг.
+[/voice_main]
+
+Исправь все такие места. Верни ТОЛЬКО исправленный размеченный текст, без пояснений.
+""".trimIndent()
+
     private suspend fun requestMarkup(
         text: String,
         token: String,
         folderId: String,
         systemPrompt: String,
     ): String {
-        val request = ChatRequest(
-            model = "gpt://$folderId/yandexgpt/latest",
+        val model = "gpt://$folderId/yandexgpt/latest"
+
+        // Первый проход — основная разметка
+        val firstResult = sendChat(
+            model = model,
+            token = token,
             messages = listOf(
                 ChatMessage(role = "system", content = systemPrompt),
                 ChatMessage(role = "user", content = text),
             ),
-            temperature = 0.5
+        )
+
+        // Второй проход — исправление диалогов
+        return sendChat(
+            model = model,
+            token = token,
+            messages = listOf(
+                ChatMessage(role = "system", content = systemPrompt),
+                ChatMessage(role = "user", content = text),
+                ChatMessage(role = "assistant", content = firstResult),
+                ChatMessage(role = "user", content = DIALOG_FIX_PROMPT),
+            ),
+        )
+    }
+
+    private suspend fun sendChat(
+        model: String,
+        token: String,
+        messages: List<ChatMessage>,
+    ): String {
+        val request = ChatRequest(
+            model = model,
+            messages = messages,
+            temperature = 0.5,
         )
 
         val response = client.post(ENDPOINT) {
