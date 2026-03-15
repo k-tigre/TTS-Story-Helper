@@ -3,6 +3,8 @@ package by.tigre.speechhelper
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
@@ -280,6 +282,25 @@ private fun MainScreen(onTokenRefresh: () -> Unit) {
         }
     }
 
+    // View mode toggle: 0 = Text, 1 = Segments
+    var viewMode by remember { mutableStateOf(0) }
+
+    // Mutable segments for the breakdown view
+    val segments = remember { mutableStateListOf<TextSegment>() }
+
+    // Sync segments from text when switching to segments view
+    LaunchedEffect(viewMode) {
+        if (viewMode == 1) {
+            segments.clear()
+            segments.addAll(TextParser.parse(text))
+        }
+    }
+
+    // Sync text back when switching to text view
+    fun syncTextFromSegments() {
+        text = TextParser.buildText(segments.toList())
+    }
+
     Scaffold(
         topBar = {
             TopAppBar(
@@ -299,19 +320,52 @@ private fun MainScreen(onTokenRefresh: () -> Unit) {
                 .fillMaxSize(),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            // Main area: text + voice panel side by side
+            // View mode toggle
+            if (hasMarkers) {
+                PrimaryTabRow(
+                    selectedTabIndex = viewMode,
+                    modifier = Modifier.width(300.dp),
+                ) {
+                    Tab(selected = viewMode == 0, onClick = {
+                        if (viewMode == 1) syncTextFromSegments()
+                        viewMode = 0
+                    }) {
+                        Text("Текст", modifier = Modifier.padding(vertical = 8.dp))
+                    }
+                    Tab(selected = viewMode == 1, onClick = { viewMode = 1 }) {
+                        Text("Разбивка", modifier = Modifier.padding(vertical = 8.dp))
+                    }
+                }
+            }
+
+            // Main area
             Row(
                 modifier = Modifier.weight(1f),
                 horizontalArrangement = Arrangement.spacedBy(12.dp),
             ) {
-                OutlinedTextField(
-                    value = text,
-                    onValueChange = { text = it },
-                    label = { Text("Текст для озвучивания") },
-                    modifier = Modifier.weight(1f).fillMaxHeight(),
-                    minLines = 5,
-                )
+                if (viewMode == 0 || !hasMarkers) {
+                    // Text view
+                    OutlinedTextField(
+                        value = text,
+                        onValueChange = { text = it },
+                        label = { Text("Текст для озвучивания") },
+                        modifier = Modifier.weight(1f).fillMaxHeight(),
+                        minLines = 5,
+                    )
+                } else {
+                    // Segments breakdown view
+                    SegmentsView(
+                        segments = segments,
+                        voiceMapping = voiceMapping,
+                        onSegmentTextChange = { index, newText ->
+                            segments[index] = segments[index].copy(text = newText)
+                        },
+                        isLoading = isLoading,
+                        modifier = Modifier.weight(1f),
+                    )
+                }
 
+                // Voice mapping panel — visible on all tabs when markers are present
                 if (hasMarkers && detectedVoices.isNotEmpty()) {
                     VoiceMappingPanel(
                         voiceNames = detectedVoices.toList(),
@@ -386,6 +440,7 @@ private fun MainScreen(onTokenRefresh: () -> Unit) {
             ) {
                 Button(
                     onClick = {
+                        if (viewMode == 1) syncTextFromSegments()
                         if (hasMarkers) {
                             clearCache()
                             launchMultiVoiceSynthesis()
@@ -400,7 +455,10 @@ private fun MainScreen(onTokenRefresh: () -> Unit) {
 
                 if (hasMarkers) {
                     OutlinedButton(
-                        onClick = { launchMultiVoiceSynthesis() },
+                        onClick = {
+                            if (viewMode == 1) syncTextFromSegments()
+                            launchMultiVoiceSynthesis()
+                        },
                         enabled = text.isNotBlank() && !isLoading && TokenStorage.hasCredentials(),
                     ) {
                         Text("Повторить ошибки")
@@ -429,6 +487,134 @@ private fun MainScreen(onTokenRefresh: () -> Unit) {
                         MaterialTheme.colorScheme.error
                     else
                         MaterialTheme.colorScheme.primary,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun SegmentsView(
+    segments: List<TextSegment>,
+    voiceMapping: Map<String, VoiceSettings>,
+    onSegmentTextChange: (index: Int, newText: String) -> Unit,
+    isLoading: Boolean,
+    modifier: Modifier = Modifier,
+) {
+    val scope = rememberCoroutineScope()
+    var playingIndex by remember { mutableStateOf(-1) }
+    var playError by remember { mutableStateOf<String?>(null) }
+
+    LazyColumn(
+        modifier = modifier,
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        itemsIndexed(segments) { index, segment ->
+            val settings = if (segment.voiceName != null) {
+                voiceMapping[segment.voiceName] ?: VoiceSettings()
+            } else {
+                VoiceSettings()
+            }
+            val voiceInfo = API_VOICES_INFO.find { it.id == settings.voice }
+            val isPlaying = playingIndex == index
+
+            Card(modifier = Modifier.fillMaxWidth()) {
+                Column(
+                    modifier = Modifier.padding(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    // Header: number + voice name + mapped voice + play button
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        // Segment number
+                        Surface(
+                            shape = MaterialTheme.shapes.small,
+                            color = MaterialTheme.colorScheme.primaryContainer,
+                        ) {
+                            Text(
+                                text = "${index + 1}",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.onPrimaryContainer,
+                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                            )
+                        }
+
+                        // Voice label
+                        Text(
+                            text = segment.voiceName ?: "без голоса",
+                            style = MaterialTheme.typography.titleSmall,
+                            color = if (segment.voiceName != null)
+                                MaterialTheme.colorScheme.primary
+                            else
+                                MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+
+                        // Mapped voice info
+                        Text(
+                            text = "\u2192 ${settings.voice} (${voiceInfo?.gender ?: "?"})",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.weight(1f),
+                        )
+
+                        // Play button
+                        if (isPlaying) {
+                            CircularProgressIndicator(modifier = Modifier.size(24.dp))
+                        } else {
+                            IconButton(
+                                onClick = {
+                                    playError = null
+                                    playingIndex = index
+                                    scope.launch {
+                                        try {
+                                            val wavBytes = SpeechKitApi.synthesize(
+                                                text = segment.text,
+                                                voice = settings.voice,
+                                                role = settings.role.ifBlank { null },
+                                                speed = settings.speed,
+                                                pitchShift = settings.pitchShift,
+                                                format = "wav",
+                                                token = TokenStorage.iamToken,
+                                            )
+                                            AudioPlayer.play(wavBytes)
+                                        } catch (e: Exception) {
+                                            playError = "#${index + 1}: ${e.message}"
+                                        } finally {
+                                            playingIndex = -1
+                                        }
+                                    }
+                                },
+                                enabled = !isLoading && playingIndex == -1,
+                            ) {
+                                Text(
+                                    "\u25B6",
+                                    style = MaterialTheme.typography.titleMedium,
+                                    color = MaterialTheme.colorScheme.primary,
+                                )
+                            }
+                        }
+                    }
+
+                    // Editable text
+                    OutlinedTextField(
+                        value = segment.text,
+                        onValueChange = { onSegmentTextChange(index, it) },
+                        modifier = Modifier.fillMaxWidth(),
+                        minLines = 2,
+                        textStyle = MaterialTheme.typography.bodyMedium,
+                    )
+                }
+            }
+        }
+
+        if (playError != null) {
+            item {
+                Text(
+                    text = playError!!,
+                    color = MaterialTheme.colorScheme.error,
+                    style = MaterialTheme.typography.bodySmall,
                 )
             }
         }

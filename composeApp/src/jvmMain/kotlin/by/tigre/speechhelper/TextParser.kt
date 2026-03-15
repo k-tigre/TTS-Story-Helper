@@ -45,4 +45,14 @@ object TextParser {
     fun hasVoiceMarkers(input: String): Boolean {
         return TAG_REGEX.containsMatchIn(input)
     }
+
+    fun buildText(segments: List<TextSegment>): String {
+        return segments.joinToString("\n") { segment ->
+            if (segment.voiceName != null) {
+                "[${segment.voiceName}]${segment.text}[/${segment.voiceName}]"
+            } else {
+                segment.text
+            }
+        }
+    }
 }
