@@ -2,8 +2,9 @@
 *A lightweight desktop app for turning Russian stories into high‑quality audio.*
 
 > **TL;DR:**  Enter a text → the app auto‑marks it up, splits it into voice segments and synthesises speech with Yandex SpeechKit.
-                                                                                                                                                                                                                                                            
 ---             
+## The main code writer on this project is AI, no review.
+---
 
 ## 📦 Project Overview
 
