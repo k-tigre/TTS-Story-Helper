@@ -19,17 +19,18 @@ object SpeechKitApi {
         voice: String,
         role: String?,
         speed: Double,
+        pitchShift: Double,
         format: String,
         token: String,
     ): ByteArray {
         val chunks = splitText(text)
         if (chunks.size == 1) {
-            return synthesizeChunk(chunks[0], voice, role, speed, format, token)
+            return synthesizeChunk(chunks[0], voice, role, speed, pitchShift, format, token)
         }
 
         val output = ByteArrayOutputStream()
         for (chunk in chunks) {
-            val bytes = synthesizeChunk(chunk, voice, role, speed, format, token)
+            val bytes = synthesizeChunk(chunk, voice, role, speed, pitchShift, format, token)
             output.write(bytes)
         }
         return output.toByteArray()
@@ -40,6 +41,7 @@ object SpeechKitApi {
         voice: String,
         role: String?,
         speed: Double,
+        pitchShift: Double,
         format: String,
         token: String,
     ): ByteArray {
@@ -48,6 +50,9 @@ object SpeechKitApi {
             add("""{"speed":$speed}""")
             if (!role.isNullOrBlank()) {
                 add("""{"role":"$role"}""")
+            }
+            if (pitchShift != 0.0) {
+                add("""{"pitch_shift":$pitchShift}""")
             }
         }
         val hintsJson = hints.joinToString(",")

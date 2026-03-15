@@ -11,17 +11,27 @@ object SessionStorage {
         get() = if (textFile.exists()) textFile.readText() else ""
         set(value) = textFile.writeText(value)
 
-    var voiceMapping: Map<String, String>
+    var voiceMapping: Map<String, VoiceSettings>
         get() {
             if (!mappingFile.exists()) return emptyMap()
             return mappingFile.readLines().mapNotNull { line ->
                 val parts = line.split("=", limit = 2)
-                if (parts.size == 2) parts[0] to parts[1] else null
+                if (parts.size == 2) {
+                    val name = parts[0]
+                    val fields = parts[1].split("|")
+                    val voice = fields.getOrElse(0) { "dasha" }
+                    val role = fields.getOrElse(1) { "" }
+                    val speed = fields.getOrElse(2) { "1.0" }.toDoubleOrNull() ?: 1.0
+                    val pitchShift = fields.getOrElse(3) { "0.0" }.toDoubleOrNull() ?: 0.0
+                    name to VoiceSettings(voice, role, speed, pitchShift)
+                } else null
             }.toMap()
         }
         set(value) {
             mappingFile.writeText(
-                value.entries.joinToString("\n") { "${it.key}=${it.value}" }
+                value.entries.joinToString("\n") { (name, s) ->
+                    "$name=${s.voice}|${s.role}|${s.speed}|${s.pitchShift}"
+                }
             )
         }
 }
