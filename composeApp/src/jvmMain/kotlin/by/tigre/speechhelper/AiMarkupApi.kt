@@ -50,7 +50,7 @@ object AiMarkupApi {
         }
     }
 
-    private const val SYSTEM_PROMPT = """
+    private val BASE_SYSTEM_PROMPT = """
 Нужно для озвучки через Yandex SpeechKit модифицировать текст, добавить акценты, разбить на голоса, используем TTS-разметка текста, паузы дополнительно если нужно указываем как <[small]>. Допустимые значения: tiny, small, medium, large, huge
 
 Пример выделение голоса: "[voice_actor]Говорит профессор[/voice_actor], обычный голос, [голос2_нежный]Говорит леди[/голос2_нежный]" - нужно поставить начало и конец голоса - это важно! В конце голоса не забывай закрывающий тэг ставить.
@@ -69,21 +69,28 @@ object AiMarkupApi {
 
 вот так правильный вариант будет
 [voice_actor]
-— Я… я не понимаю, о чём вы, — 
+— Я… я не понимаю, о чём вы, —
 [/voice_actor]
 [voice_рассказчик]
 пробормотал он, отступая на шаг.
 [/voice_рассказчик]
 
 ВАЖНО: Нельзя менять содержание текста!Верни ТОЛЬКО размеченный текст, без пояснений.
-"""
+""".trimIndent()
+
+    private fun buildSystemPrompt(existingVoices: Set<String>): String {
+        if (existingVoices.isEmpty()) return BASE_SYSTEM_PROMPT
+        val voicesList = existingVoices.joinToString(", ") { it }
+        return BASE_SYSTEM_PROMPT + "\n\nВ книге уже используются следующие голоса: $voicesList. Используй эти же имена голосов для разметки, не придумывай новые без необходимости."
+    }
 
     suspend fun autoMarkup(
         text: String,
         token: String,
         folderId: String,
-        systemPrompt: String = SYSTEM_PROMPT,
+        existingVoices: Set<String> = emptySet(),
     ): String {
+        val systemPrompt = buildSystemPrompt(existingVoices)
         val chunks = splitTextForAi(text)
         if (chunks.size == 1) {
             return requestMarkup(chunks[0], token, folderId, systemPrompt)
