@@ -390,6 +390,7 @@ private fun MainScreen(onTokenRefresh: () -> Unit) {
     var showClearAllDialog by remember { mutableStateOf(false) }
     var showSaveBookDialog by remember { mutableStateOf(false) }
     var showLoadBookDialog by remember { mutableStateOf(false) }
+    var showFolderIdDialog by remember { mutableStateOf(false) }
     var currentBookName by remember { mutableStateOf("") }
 
     // Chapter content state
@@ -448,6 +449,38 @@ private fun MainScreen(onTokenRefresh: () -> Unit) {
 
     fun saveVoiceMapping() {
         SessionStorage.voiceMapping = voiceMapping.toMap()
+    }
+
+    fun launchAutoMarkup() {
+        val folderId = TokenStorage.folderId
+        if (folderId.isBlank()) {
+            showFolderIdDialog = true
+            return
+        }
+        if (text.isBlank() || isLoading) return
+        isLoading = true
+        progressMessage = "Авто-разметка..."
+        statusMessage = ""
+        scope.launch {
+            try {
+                val result = withContext(Dispatchers.IO) {
+                    AiMarkupApi.autoMarkup(
+                        text = text,
+                        token = TokenStorage.iamToken,
+                        folderId = folderId,
+                    )
+                }
+                text = result
+                saveCurrentChapter()
+                statusMessage = "Авто-разметка завершена"
+            } catch (e: Exception) {
+                statusMessage = "Ошибка авто-разметки: ${e.message}"
+                e.printStackTrace()
+            } finally {
+                isLoading = false
+                progressMessage = ""
+            }
+        }
     }
 
     fun launchMultiVoiceSynthesis(retryVoice: String? = null) {
@@ -663,6 +696,38 @@ private fun MainScreen(onTokenRefresh: () -> Unit) {
         )
     }
 
+    if (showFolderIdDialog) {
+        var folderIdInput by remember { mutableStateOf(TokenStorage.folderId) }
+        AlertDialog(
+            onDismissRequest = { showFolderIdDialog = false },
+            title = { Text("Folder ID") },
+            text = {
+                OutlinedTextField(
+                    value = folderIdInput,
+                    onValueChange = { folderIdInput = it },
+                    label = { Text("Идентификатор каталога Yandex Cloud") },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        TokenStorage.folderId = folderIdInput
+                        showFolderIdDialog = false
+                        launchAutoMarkup()
+                    },
+                    enabled = folderIdInput.isNotBlank(),
+                ) {
+                    Text("Сохранить")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showFolderIdDialog = false }) { Text("Отмена") }
+            },
+        )
+    }
+
     if (showLoadBookDialog) {
         LoadBookDialog(
             onDismiss = { showLoadBookDialog = false },
@@ -871,6 +936,13 @@ private fun MainScreen(onTokenRefresh: () -> Unit) {
                     enabled = text.isNotBlank() && !isLoading && TokenStorage.hasCredentials(),
                 ) {
                     Text("Озвучить")
+                }
+
+                OutlinedButton(
+                    onClick = { launchAutoMarkup() },
+                    enabled = text.isNotBlank() && !isLoading && TokenStorage.hasCredentials() && !hasMarkers,
+                ) {
+                    Text("Авто-разметка")
                 }
 
                 if (hasMarkers) {
