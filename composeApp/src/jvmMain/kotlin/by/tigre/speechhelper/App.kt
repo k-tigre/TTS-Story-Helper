@@ -391,7 +391,7 @@ private fun MainScreen(onTokenRefresh: () -> Unit) {
     var showSaveBookDialog by remember { mutableStateOf(false) }
     var showLoadBookDialog by remember { mutableStateOf(false) }
     var showFolderIdDialog by remember { mutableStateOf(false) }
-    var currentBookName by remember { mutableStateOf("") }
+    var currentBookName by remember { mutableStateOf(SessionStorage.currentBookName) }
 
     // Chapter content state
     var text by remember(currentChapterId) { mutableStateOf(SessionStorage.getChapterText(currentChapterId)) }
@@ -669,6 +669,7 @@ private fun MainScreen(onTokenRefresh: () -> Unit) {
                         chapters = SessionStorage.listChapters()
                         currentChapterId = id
                         voiceMapping.clear()
+                        currentBookName = ""
                         statusMessage = "Всё очищено"
                         showClearAllDialog = false
                     },
@@ -691,6 +692,7 @@ private fun MainScreen(onTokenRefresh: () -> Unit) {
                 saveVoiceMapping()
                 SessionStorage.saveBook(bookName)
                 currentBookName = bookName
+                SessionStorage.currentBookName = bookName
                 statusMessage = "Книга \"$bookName\" сохранена"
                 showSaveBookDialog = false
             },
@@ -740,6 +742,7 @@ private fun MainScreen(onTokenRefresh: () -> Unit) {
                     voiceMapping.clear()
                     voiceMapping.putAll(SessionStorage.voiceMapping)
                     currentBookName = bookName
+                    SessionStorage.currentBookName = bookName
                     statusMessage = "Книга \"$bookName\" загружена"
                 } else {
                     statusMessage = "Ошибка: не удалось загрузить книгу"
