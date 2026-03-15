@@ -447,6 +447,15 @@ private fun MainScreen(onTokenRefresh: () -> Unit) {
         }
     }
 
+    fun removeUnusedVoices() {
+        val unused = voiceMapping.keys - detectedVoices
+        for (name in unused) {
+            voiceMapping.remove(name)
+        }
+        saveVoiceMapping()
+        statusMessage = if (unused.isEmpty()) "Нет неиспользуемых голосов" else "Удалено голосов: ${unused.size}"
+    }
+
     fun saveVoiceMapping() {
         SessionStorage.voiceMapping = voiceMapping.toMap()
     }
@@ -909,6 +918,7 @@ private fun MainScreen(onTokenRefresh: () -> Unit) {
                         onRetryVoice = { name ->
                             launchMultiVoiceSynthesis(retryVoice = name)
                         },
+                        onCleanupVoices = { removeUnusedVoices() },
                         isLoading = isLoading,
                         modifier = Modifier.width(350.dp).fillMaxHeight(),
                     )
@@ -1180,6 +1190,7 @@ private fun VoiceMappingPanel(
     mapping: Map<String, VoiceSettings>,
     onSettingsChange: (name: String, settings: VoiceSettings) -> Unit,
     onRetryVoice: (name: String) -> Unit,
+    onCleanupVoices: () -> Unit,
     isLoading: Boolean,
     modifier: Modifier = Modifier,
 ) {
@@ -1192,7 +1203,21 @@ private fun VoiceMappingPanel(
                 .verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.spacedBy(4.dp),
         ) {
-            Text("Голоса", style = MaterialTheme.typography.titleSmall)
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text("Голоса", style = MaterialTheme.typography.titleSmall, modifier = Modifier.weight(1f))
+                val hasUnused = voiceNames.any { it !in activeVoiceNames }
+                if (hasUnused) {
+                    TextButton(
+                        onClick = onCleanupVoices,
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+                    ) {
+                        Text("Убрать неиспользуемые", style = MaterialTheme.typography.labelSmall)
+                    }
+                }
+            }
             HorizontalDivider()
 
             voiceNames.forEach { name ->
