@@ -11,6 +11,20 @@ object SessionStorage {
         get() = if (textFile.exists()) textFile.readText() else ""
         set(value) = textFile.writeText(value)
 
+    var windowWidth: Int
+        get() = windowSizeFile.takeIf { it.exists() }?.readLines()?.getOrNull(0)?.toIntOrNull() ?: 800
+        set(value) = windowSizeFile.writeText("$value\n$windowHeight")
+
+    var windowHeight: Int
+        get() = windowSizeFile.takeIf { it.exists() }?.readLines()?.getOrNull(1)?.toIntOrNull() ?: 600
+        set(value) = windowSizeFile.writeText("$windowWidth\n$value")
+
+    private val windowSizeFile = File(dir, "window_size.txt")
+
+    fun saveWindowSize(width: Int, height: Int) {
+        windowSizeFile.writeText("$width\n$height")
+    }
+
     var voiceMapping: Map<String, VoiceSettings>
         get() {
             if (!mappingFile.exists()) return emptyMap()
