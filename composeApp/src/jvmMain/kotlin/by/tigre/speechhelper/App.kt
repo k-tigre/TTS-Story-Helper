@@ -10,7 +10,10 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import androidx.compose.runtime.snapshotFlow
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.FlowPreview
+import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -53,7 +56,7 @@ private val API_VOICES = API_VOICES_INFO.map { it.id }
 
 private val FORMATS = listOf("mp3", "ogg", "wav")
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, FlowPreview::class)
 @Composable
 fun App() {
     var showTokenDialog by remember { mutableStateOf(!TokenStorage.hasCredentials()) }
@@ -136,9 +139,11 @@ private fun MainScreen(onTokenRefresh: () -> Unit) {
         voiceMapping.putAll(saved)
     }
 
-    // Save text on change
-    LaunchedEffect(text) {
-        SessionStorage.text = text
+    // Save text on change (debounced)
+    LaunchedEffect(Unit) {
+        snapshotFlow { text }
+            .debounce(30_000)
+            .collect { SessionStorage.text = it }
     }
 
     val hasMarkers = TextParser.hasVoiceMarkers(text)
