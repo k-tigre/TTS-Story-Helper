@@ -208,6 +208,115 @@ private fun DeleteChapterDialog(
     )
 }
 
+@Composable
+private fun SaveBookDialog(
+    onDismiss: () -> Unit,
+    onSave: (name: String) -> Unit,
+) {
+    var name by remember { mutableStateOf("") }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Сохранить книгу") },
+        text = {
+            OutlinedTextField(
+                value = name,
+                onValueChange = { name = it },
+                label = { Text("Название книги") },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true,
+            )
+        },
+        confirmButton = {
+            Button(
+                onClick = { onSave(name) },
+                enabled = name.isNotBlank(),
+            ) {
+                Text("Сохранить")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Отмена") }
+        },
+    )
+}
+
+@Composable
+private fun LoadBookDialog(
+    onDismiss: () -> Unit,
+    onLoad: (name: String) -> Unit,
+    onDelete: (name: String) -> Unit,
+) {
+    var books by remember { mutableStateOf(SessionStorage.listBooks()) }
+    var confirmDeleteBook by remember { mutableStateOf<String?>(null) }
+
+    if (confirmDeleteBook != null) {
+        AlertDialog(
+            onDismissRequest = { confirmDeleteBook = null },
+            title = { Text("Удалить книгу?") },
+            text = { Text("Книга \"$confirmDeleteBook\" будет удалена.") },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        onDelete(confirmDeleteBook!!)
+                        confirmDeleteBook = null
+                        books = SessionStorage.listBooks()
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
+                ) {
+                    Text("Удалить")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmDeleteBook = null }) { Text("Отмена") }
+            },
+        )
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Загрузить книгу") },
+        text = {
+            if (books.isEmpty()) {
+                Text("Нет сохранённых книг")
+            } else {
+                Column(
+                    modifier = Modifier.verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    books.forEach { bookName ->
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
+                            TextButton(
+                                onClick = { onLoad(bookName) },
+                                modifier = Modifier.weight(1f),
+                            ) {
+                                Text(
+                                    text = bookName,
+                                    modifier = Modifier.fillMaxWidth(),
+                                )
+                            }
+                            IconButton(onClick = { confirmDeleteBook = bookName }) {
+                                Text(
+                                    "\u2716",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.error,
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {},
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Закрыть") }
+        },
+    )
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun ChapterSelector(
@@ -278,6 +387,9 @@ private fun MainScreen(onTokenRefresh: () -> Unit) {
     var showCreateDialog by remember { mutableStateOf(false) }
     var showRenameDialog by remember { mutableStateOf(false) }
     var showDeleteDialog by remember { mutableStateOf(false) }
+    var showClearAllDialog by remember { mutableStateOf(false) }
+    var showSaveBookDialog by remember { mutableStateOf(false) }
+    var showLoadBookDialog by remember { mutableStateOf(false) }
 
     // Chapter content state
     var text by remember(currentChapterId) { mutableStateOf(SessionStorage.getChapterText(currentChapterId)) }
@@ -506,6 +618,69 @@ private fun MainScreen(onTokenRefresh: () -> Unit) {
         )
     }
 
+    if (showClearAllDialog) {
+        AlertDialog(
+            onDismissRequest = { showClearAllDialog = false },
+            title = { Text("Очистить всё?") },
+            text = { Text("Все главы, настройки голосов и кэш будут удалены. Это действие нельзя отменить.") },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        saveCurrentChapter()
+                        SessionStorage.clearAllData()
+                        val id = SessionStorage.ensureCurrentChapter()
+                        chapters = SessionStorage.listChapters()
+                        currentChapterId = id
+                        voiceMapping.clear()
+                        statusMessage = "Всё очищено"
+                        showClearAllDialog = false
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
+                ) {
+                    Text("Очистить")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showClearAllDialog = false }) { Text("Отмена") }
+            },
+        )
+    }
+
+    if (showSaveBookDialog) {
+        SaveBookDialog(
+            onDismiss = { showSaveBookDialog = false },
+            onSave = { bookName ->
+                saveCurrentChapter()
+                saveVoiceMapping()
+                SessionStorage.saveBook(bookName)
+                statusMessage = "Книга \"$bookName\" сохранена"
+                showSaveBookDialog = false
+            },
+        )
+    }
+
+    if (showLoadBookDialog) {
+        LoadBookDialog(
+            onDismiss = { showLoadBookDialog = false },
+            onLoad = { bookName ->
+                saveCurrentChapter()
+                if (SessionStorage.loadBook(bookName)) {
+                    chapters = SessionStorage.listChapters()
+                    currentChapterId = SessionStorage.ensureCurrentChapter()
+                    voiceMapping.clear()
+                    voiceMapping.putAll(SessionStorage.voiceMapping)
+                    statusMessage = "Книга \"$bookName\" загружена"
+                } else {
+                    statusMessage = "Ошибка: не удалось загрузить книгу"
+                }
+                showLoadBookDialog = false
+            },
+            onDelete = { bookName ->
+                SessionStorage.deleteBook(bookName)
+            },
+        )
+    }
+
     Scaffold(
         topBar = {
             TopAppBar(
@@ -520,6 +695,20 @@ private fun MainScreen(onTokenRefresh: () -> Unit) {
                     )
                 },
                 actions = {
+                    TextButton(onClick = { showSaveBookDialog = true }) {
+                        Text("Сохранить книгу")
+                    }
+                    TextButton(onClick = { showLoadBookDialog = true }) {
+                        Text("Загрузить книгу")
+                    }
+                    TextButton(
+                        onClick = { showClearAllDialog = true },
+                        colors = ButtonDefaults.textButtonColors(
+                            contentColor = MaterialTheme.colorScheme.error,
+                        ),
+                    ) {
+                        Text("Очистить всё")
+                    }
                     TextButton(onClick = onTokenRefresh) {
                         Text("Обновить токен")
                     }
