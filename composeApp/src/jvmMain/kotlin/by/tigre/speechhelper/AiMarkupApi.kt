@@ -44,13 +44,13 @@ private data class Choice(
 
 object AiMarkupApi {
     private const val ENDPOINT = "https://ai.api.cloud.yandex.net/v1/chat/completions"
-    private const val CHUNK_LIMIT = 2000
+    private const val CHUNK_LIMIT = 1000
 
     private val json = Json { ignoreUnknownKeys = true }
 
     private val client = HttpClient(CIO) {
         engine {
-            requestTimeout = 120_000
+            requestTimeout = 240_000
         }
         install(ContentNegotiation) {
             json(this@AiMarkupApi.json)
@@ -144,7 +144,7 @@ object AiMarkupApi {
         folderId: String,
         systemPrompt: String,
     ): String {
-        val model = "gpt://$folderId/yandexgpt/latest"
+        val model = "gpt://$folderId/deepseek-v32/latest"
 
         // Первый проход — основная разметка
         println("[AiMarkup] Проход 1: основная разметка (${text.length} символов)...")
