@@ -12,6 +12,10 @@ object TokenStorage {
         get() = prefs.get(KEY_IAM_TOKEN, "")
         set(value) = prefs.put(KEY_IAM_TOKEN, value)
 
+    var folderId: String
+        get() = prefs.get(KEY_FOLDER_ID, "")
+        set(value) = prefs.put(KEY_FOLDER_ID, value)
+
     fun hasCredentials(): Boolean = iamToken.isNotBlank()
 
     fun clear() {
