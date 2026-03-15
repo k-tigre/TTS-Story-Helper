@@ -390,6 +390,7 @@ private fun MainScreen(onTokenRefresh: () -> Unit) {
     var showClearAllDialog by remember { mutableStateOf(false) }
     var showSaveBookDialog by remember { mutableStateOf(false) }
     var showLoadBookDialog by remember { mutableStateOf(false) }
+    var currentBookName by remember { mutableStateOf("") }
 
     // Chapter content state
     var text by remember(currentChapterId) { mutableStateOf(SessionStorage.getChapterText(currentChapterId)) }
@@ -510,7 +511,8 @@ private fun MainScreen(onTokenRefresh: () -> Unit) {
                     statusMessage = "Ошибка: ни один сегмент не озвучен"
                 } else {
                     val combined = allParts.reduce { acc, bytes -> acc + bytes }
-                    val filePath = saveAudioFile(combined, "mp3")
+                    val chapterName = chapters.find { it.id == currentChapterId }?.name ?: ""
+                    val filePath = saveAudioFile(combined, "mp3", bookName = currentBookName, chapterName = chapterName)
                     val successCount = allParts.size
                     val totalCount = segments.size
                     statusMessage = if (errors.isEmpty()) {
@@ -546,7 +548,8 @@ private fun MainScreen(onTokenRefresh: () -> Unit) {
                     format = selectedFormat,
                     token = TokenStorage.iamToken,
                 )
-                val filePath = saveAudioFile(audioBytes, selectedFormat)
+                val chapterName = chapters.find { it.id == currentChapterId }?.name ?: ""
+                val filePath = saveAudioFile(audioBytes, selectedFormat, bookName = currentBookName, chapterName = chapterName)
                 statusMessage = "Сохранено: $filePath"
             } catch (e: Exception) {
                 statusMessage = "Ошибка: ${e.message}"
@@ -653,6 +656,7 @@ private fun MainScreen(onTokenRefresh: () -> Unit) {
                 saveCurrentChapter()
                 saveVoiceMapping()
                 SessionStorage.saveBook(bookName)
+                currentBookName = bookName
                 statusMessage = "Книга \"$bookName\" сохранена"
                 showSaveBookDialog = false
             },
@@ -669,6 +673,7 @@ private fun MainScreen(onTokenRefresh: () -> Unit) {
                     currentChapterId = SessionStorage.ensureCurrentChapter()
                     voiceMapping.clear()
                     voiceMapping.putAll(SessionStorage.voiceMapping)
+                    currentBookName = bookName
                     statusMessage = "Книга \"$bookName\" загружена"
                 } else {
                     statusMessage = "Ошибка: не удалось загрузить книгу"
@@ -695,7 +700,16 @@ private fun MainScreen(onTokenRefresh: () -> Unit) {
                     )
                 },
                 actions = {
-                    TextButton(onClick = { showSaveBookDialog = true }) {
+                    TextButton(onClick = {
+                        if (currentBookName.isNotBlank()) {
+                            saveCurrentChapter()
+                            saveVoiceMapping()
+                            SessionStorage.saveBook(currentBookName)
+                            statusMessage = "Книга \"$currentBookName\" сохранена"
+                        } else {
+                            showSaveBookDialog = true
+                        }
+                    }) {
                         Text("Сохранить книгу")
                     }
                     TextButton(onClick = { showLoadBookDialog = true }) {
@@ -1207,7 +1221,7 @@ private fun DropdownSelector(
     }
 }
 
-private suspend fun saveAudioFile(bytes: ByteArray, format: String): String {
+private suspend fun saveAudioFile(bytes: ByteArray, format: String, bookName: String = "", chapterName: String = ""): String {
     return withContext(Dispatchers.IO) {
         val ext = when (format) {
             "oggopus" -> "ogg"
@@ -1216,7 +1230,14 @@ private suspend fun saveAudioFile(bytes: ByteArray, format: String): String {
         val dir = File(System.getProperty("user.home"), "SpeechHelper")
         dir.mkdirs()
         val timestamp = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss"))
-        val file = File(dir, "speech_${timestamp}.$ext")
+        val safeName = { s: String -> s.replace(Regex("[^\\w\\s\\-()\\[\\]а-яА-ЯёЁ]"), "_").trim() }
+        val nameParts = listOfNotNull(
+            bookName.takeIf { it.isNotBlank() }?.let { safeName(it) },
+            chapterName.takeIf { it.isNotBlank() }?.let { safeName(it) },
+            timestamp,
+        )
+        val fileName = nameParts.joinToString(" - ")
+        val file = File(dir, "$fileName.$ext")
         file.writeBytes(bytes)
         file.absolutePath
     }
