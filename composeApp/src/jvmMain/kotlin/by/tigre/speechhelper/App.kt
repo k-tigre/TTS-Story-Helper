@@ -125,9 +125,6 @@ private fun MainScreen(onTokenRefresh: () -> Unit) {
     val detectedVoices: Set<String> = remember(text) {
         if (hasMarkers) TextParser.extractVoiceNames(text) else emptySet()
     }
-    val voiceRoles: Map<String, Set<String>> = remember(text) {
-        if (hasMarkers) TextParser.extractVoiceRoles(text) else emptyMap()
-    }
 
     // Ensure all detected voices have a mapping
     LaunchedEffect(detectedVoices) {
@@ -165,7 +162,11 @@ private fun MainScreen(onTokenRefresh: () -> Unit) {
                 val errors = mutableListOf<String>()
 
                 for ((index, segment) in segments.withIndex()) {
-                    val apiVoice = voiceMapping[segment.voiceName] ?: API_VOICES[0]
+                    val apiVoice = if (segment.voiceName != null) {
+                        voiceMapping[segment.voiceName] ?: API_VOICES[0]
+                    } else {
+                        API_VOICES[0]
+                    }
                     val partFile = File(cacheDir, "part_%03d.mp3".format(index))
 
                     // Skip already cached unless retrying this voice
@@ -174,19 +175,19 @@ private fun MainScreen(onTokenRefresh: () -> Unit) {
                         continue
                     }
 
-                    progressMessage = "Обработка ${index + 1} из ${segments.size} (${segment.voiceName} -> $apiVoice)..."
+                    progressMessage = "Обработка ${index + 1} из ${segments.size} (${segment.voiceName ?: "по умолчанию"} -> $apiVoice)..."
                     try {
                         val bytes = SpeechKitApi.synthesize(
                             text = segment.text,
                             voice = apiVoice,
-                            role = segment.role,
-                            speed = segment.speed,
+                            role = null,
+                            speed = 1.0,
                             format = "mp3",
                             token = TokenStorage.iamToken,
                         )
                         withContext(Dispatchers.IO) { partFile.writeBytes(bytes) }
                     } catch (e: Exception) {
-                        errors.add("#${index + 1} ${segment.voiceName}: ${e.message}")
+                        errors.add("#${index + 1} ${segment.voiceName ?: "по умолчанию"}: ${e.message}")
                         // Delete failed part so it will be retried next time
                         partFile.delete()
                     }
@@ -287,7 +288,6 @@ private fun MainScreen(onTokenRefresh: () -> Unit) {
                 if (hasMarkers && detectedVoices.isNotEmpty()) {
                     VoiceMappingPanel(
                         voiceNames = detectedVoices.toList(),
-                        voiceRoles = voiceRoles,
                         mapping = voiceMapping,
                         onMappingChange = { name, apiVoice ->
                             voiceMapping[name] = apiVoice
@@ -385,7 +385,6 @@ private fun MainScreen(onTokenRefresh: () -> Unit) {
 @Composable
 private fun VoiceMappingPanel(
     voiceNames: List<String>,
-    voiceRoles: Map<String, Set<String>>,
     mapping: Map<String, String>,
     onMappingChange: (name: String, apiVoice: String) -> Unit,
     onRetryVoice: (name: String) -> Unit,
@@ -403,12 +402,7 @@ private fun VoiceMappingPanel(
             HorizontalDivider()
 
             voiceNames.forEach { name ->
-                val textRoles = voiceRoles[name]
                 val selectedApiVoice = mapping[name] ?: API_VOICES[0]
-                val apiVoiceInfo = API_VOICES_INFO.find { it.id == selectedApiVoice }
-                val availableRoles = apiVoiceInfo?.roles?.toSet() ?: emptySet()
-                val missingRoles = textRoles?.filter { it !in availableRoles } ?: emptyList()
-                val hasMismatch = missingRoles.isNotEmpty()
 
                 Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                     Row(
@@ -416,24 +410,11 @@ private fun VoiceMappingPanel(
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                         modifier = Modifier.fillMaxWidth(),
                     ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = name,
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = if (hasMismatch) MaterialTheme.colorScheme.error
-                                    else MaterialTheme.colorScheme.onSurface,
-                            )
-                            if (!textRoles.isNullOrEmpty()) {
-                                Text(
-                                    text = "роли: " + textRoles.joinToString(", ") { role ->
-                                        if (role in availableRoles) role else "$role ✗"
-                                    },
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = if (hasMismatch) MaterialTheme.colorScheme.error
-                                        else MaterialTheme.colorScheme.onSurfaceVariant,
-                                )
-                            }
-                        }
+                        Text(
+                            text = name,
+                            style = MaterialTheme.typography.bodyMedium,
+                            modifier = Modifier.weight(1f),
+                        )
                         DropdownSelector(
                             label = "",
                             items = API_VOICES,
@@ -445,17 +426,7 @@ private fun VoiceMappingPanel(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
-                        if (apiVoiceInfo != null) {
-                            Text(
-                                text = "${apiVoiceInfo.gender}, ${apiVoiceInfo.roles.joinToString(", ")}",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = if (hasMismatch) MaterialTheme.colorScheme.error
-                                    else MaterialTheme.colorScheme.primary,
-                                modifier = Modifier.weight(1f),
-                            )
-                        } else {
-                            Spacer(Modifier.weight(1f))
-                        }
+                        Spacer(Modifier.weight(1f))
                         TextButton(
                             onClick = { onRetryVoice(name) },
                             enabled = !isLoading,
