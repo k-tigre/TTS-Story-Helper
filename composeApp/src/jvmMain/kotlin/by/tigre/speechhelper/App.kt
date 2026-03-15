@@ -117,12 +117,170 @@ private fun TokenDialog(
     )
 }
 
+@Composable
+private fun CreateChapterDialog(
+    onDismiss: () -> Unit,
+    onCreate: (name: String) -> Unit,
+) {
+    var name by remember { mutableStateOf("") }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Новая глава") },
+        text = {
+            OutlinedTextField(
+                value = name,
+                onValueChange = { name = it },
+                label = { Text("Название") },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true,
+            )
+        },
+        confirmButton = {
+            Button(
+                onClick = { onCreate(name) },
+                enabled = name.isNotBlank(),
+            ) {
+                Text("Создать")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Отмена") }
+        },
+    )
+}
+
+@Composable
+private fun RenameChapterDialog(
+    currentName: String,
+    onDismiss: () -> Unit,
+    onRename: (name: String) -> Unit,
+) {
+    var name by remember { mutableStateOf(currentName) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Переименовать главу") },
+        text = {
+            OutlinedTextField(
+                value = name,
+                onValueChange = { name = it },
+                label = { Text("Название") },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true,
+            )
+        },
+        confirmButton = {
+            Button(
+                onClick = { onRename(name) },
+                enabled = name.isNotBlank(),
+            ) {
+                Text("Сохранить")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Отмена") }
+        },
+    )
+}
+
+@Composable
+private fun DeleteChapterDialog(
+    chapterName: String,
+    onDismiss: () -> Unit,
+    onDelete: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Удалить главу?") },
+        text = { Text("Глава \"$chapterName\" будет удалена вместе с кэшем. Это действие нельзя отменить.") },
+        confirmButton = {
+            Button(
+                onClick = onDelete,
+                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
+            ) {
+                Text("Удалить")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Отмена") }
+        },
+    )
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun ChapterSelector(
+    chapters: List<ChapterInfo>,
+    currentChapterId: String,
+    onSelectChapter: (String) -> Unit,
+    onCreateChapter: () -> Unit,
+    onRenameChapter: () -> Unit,
+    onDeleteChapter: () -> Unit,
+) {
+    var expanded by remember { mutableStateOf(false) }
+    val currentName = chapters.find { it.id == currentChapterId }?.name ?: "—"
+
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        Box {
+            OutlinedButton(onClick = { expanded = true }) {
+                Text(currentName, maxLines = 1)
+            }
+            DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+                chapters.forEach { chapter ->
+                    DropdownMenuItem(
+                        text = {
+                            Text(
+                                text = chapter.name,
+                                fontWeight = if (chapter.id == currentChapterId)
+                                    androidx.compose.ui.text.font.FontWeight.Bold
+                                else
+                                    null,
+                            )
+                        },
+                        onClick = {
+                            onSelectChapter(chapter.id)
+                            expanded = false
+                        },
+                    )
+                }
+            }
+        }
+
+        IconButton(onClick = onCreateChapter) {
+            Text("+", style = MaterialTheme.typography.titleMedium)
+        }
+
+        IconButton(onClick = onRenameChapter) {
+            Text("\u270E", style = MaterialTheme.typography.bodyMedium)
+        }
+
+        if (chapters.size > 1) {
+            IconButton(onClick = onDeleteChapter) {
+                Text("\u2716", style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.error)
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class, FlowPreview::class)
 @Composable
 private fun MainScreen(onTokenRefresh: () -> Unit) {
     val scope = rememberCoroutineScope()
 
-    var text by remember { mutableStateOf(SessionStorage.text) }
+    // Chapter management state
+    var chapters by remember { mutableStateOf(SessionStorage.listChapters()) }
+    var currentChapterId by remember { mutableStateOf(SessionStorage.ensureCurrentChapter()) }
+    var showCreateDialog by remember { mutableStateOf(false) }
+    var showRenameDialog by remember { mutableStateOf(false) }
+    var showDeleteDialog by remember { mutableStateOf(false) }
+
+    // Chapter content state
+    var text by remember(currentChapterId) { mutableStateOf(SessionStorage.getChapterText(currentChapterId)) }
     var selectedVoice by remember { mutableStateOf(API_VOICES[0]) }
     var selectedFormat by remember { mutableStateOf(FORMATS[0]) }
     var speed by remember { mutableStateOf(1.0) }
@@ -133,19 +291,32 @@ private fun MainScreen(onTokenRefresh: () -> Unit) {
     var progressMessage by remember { mutableStateOf("") }
     var statusMessage by remember { mutableStateOf("") }
 
+    // Voice mapping is global (shared across all chapters)
     val voiceMapping = remember { mutableStateMapOf<String, VoiceSettings>() }
 
-    // Load saved mapping on first composition
+    // Load saved mapping once
     LaunchedEffect(Unit) {
         val saved = SessionStorage.voiceMapping
         voiceMapping.putAll(saved)
     }
 
     // Save text on change (debounced)
-    LaunchedEffect(Unit) {
+    LaunchedEffect(currentChapterId) {
         snapshotFlow { text }
             .debounce(30_000)
-            .collect { SessionStorage.text = it }
+            .collect { SessionStorage.setChapterText(currentChapterId, it) }
+    }
+
+    fun saveCurrentChapter() {
+        SessionStorage.setChapterText(currentChapterId, text)
+    }
+
+    fun switchToChapter(id: String) {
+        if (id == currentChapterId) return
+        saveCurrentChapter()
+        currentChapterId = id
+        SessionStorage.currentChapterId = id
+        statusMessage = ""
     }
 
     val hasMarkers = TextParser.hasVoiceMarkers(text)
@@ -159,11 +330,6 @@ private fun MainScreen(onTokenRefresh: () -> Unit) {
             if (name !in voiceMapping) {
                 voiceMapping[name] = VoiceSettings()
             }
-        }
-        // Remove stale mappings
-        val stale = voiceMapping.keys - detectedVoices
-        for (key in stale) {
-            voiceMapping.remove(key)
         }
     }
 
@@ -184,7 +350,7 @@ private fun MainScreen(onTokenRefresh: () -> Unit) {
             progressMessage = ""
             try {
                 val cacheDir = withContext(Dispatchers.IO) {
-                    File(System.getProperty("user.home"), "SpeechHelper/cache").apply { mkdirs() }
+                    SessionStorage.getChapterCacheDir(currentChapterId)
                 }
                 val errors = mutableListOf<String>()
 
@@ -249,10 +415,7 @@ private fun MainScreen(onTokenRefresh: () -> Unit) {
     }
 
     fun clearCache() {
-        val cacheDir = File(System.getProperty("user.home"), "SpeechHelper/cache")
-        if (cacheDir.exists()) {
-            cacheDir.listFiles()?.forEach { it.delete() }
-        }
+        SessionStorage.clearChapterCache(currentChapterId)
         statusMessage = "Кэш очищен"
     }
 
@@ -301,10 +464,61 @@ private fun MainScreen(onTokenRefresh: () -> Unit) {
         text = TextParser.buildText(segments.toList())
     }
 
+    // Dialogs
+    if (showCreateDialog) {
+        CreateChapterDialog(
+            onDismiss = { showCreateDialog = false },
+            onCreate = { name ->
+                saveCurrentChapter()
+                val id = SessionStorage.createChapter(name)
+                chapters = SessionStorage.listChapters()
+                switchToChapter(id)
+                showCreateDialog = false
+            },
+        )
+    }
+
+    if (showRenameDialog) {
+        val currentName = chapters.find { it.id == currentChapterId }?.name ?: ""
+        RenameChapterDialog(
+            currentName = currentName,
+            onDismiss = { showRenameDialog = false },
+            onRename = { name ->
+                SessionStorage.renameChapter(currentChapterId, name)
+                chapters = SessionStorage.listChapters()
+                showRenameDialog = false
+            },
+        )
+    }
+
+    if (showDeleteDialog) {
+        val currentName = chapters.find { it.id == currentChapterId }?.name ?: ""
+        DeleteChapterDialog(
+            chapterName = currentName,
+            onDismiss = { showDeleteDialog = false },
+            onDelete = {
+                val idToDelete = currentChapterId
+                SessionStorage.deleteChapter(idToDelete)
+                chapters = SessionStorage.listChapters()
+                currentChapterId = SessionStorage.ensureCurrentChapter()
+                showDeleteDialog = false
+            },
+        )
+    }
+
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("SpeechHelper") },
+                title = {
+                    ChapterSelector(
+                        chapters = chapters,
+                        currentChapterId = currentChapterId,
+                        onSelectChapter = { switchToChapter(it) },
+                        onCreateChapter = { showCreateDialog = true },
+                        onRenameChapter = { showRenameDialog = true },
+                        onDeleteChapter = { showDeleteDialog = true },
+                    )
+                },
                 actions = {
                     TextButton(onClick = onTokenRefresh) {
                         Text("Обновить токен")
@@ -365,10 +579,13 @@ private fun MainScreen(onTokenRefresh: () -> Unit) {
                     )
                 }
 
-                // Voice mapping panel — visible on all tabs when markers are present
-                if (hasMarkers && detectedVoices.isNotEmpty()) {
+                // Voice mapping panel — visible when any voices are configured
+                if (voiceMapping.isNotEmpty()) {
+                    val allVoiceNames = (detectedVoices + voiceMapping.keys).toList()
+                        .sortedWith(compareByDescending<String> { it in detectedVoices }.thenBy { it })
                     VoiceMappingPanel(
-                        voiceNames = detectedVoices.toList(),
+                        voiceNames = allVoiceNames,
+                        activeVoiceNames = detectedVoices,
                         mapping = voiceMapping,
                         onSettingsChange = { name, settings ->
                             voiceMapping[name] = settings
@@ -624,6 +841,7 @@ private fun SegmentsView(
 @Composable
 private fun VoiceMappingPanel(
     voiceNames: List<String>,
+    activeVoiceNames: Set<String>,
     mapping: Map<String, VoiceSettings>,
     onSettingsChange: (name: String, settings: VoiceSettings) -> Unit,
     onRetryVoice: (name: String) -> Unit,
@@ -643,6 +861,7 @@ private fun VoiceMappingPanel(
             HorizontalDivider()
 
             voiceNames.forEach { name ->
+                val isActive = name in activeVoiceNames
                 val settings = mapping[name] ?: VoiceSettings()
                 val expanded = expandedVoices[name] ?: false
                 val voiceInfo = API_VOICES_INFO.find { it.id == settings.voice }
@@ -653,6 +872,8 @@ private fun VoiceMappingPanel(
                 val speedSummary = "%.1f".format(settings.speed)
                 val pitchSummary = "%.0f".format(settings.pitchShift)
                 val genderIcon = voiceInfo?.gender ?: "?"
+
+                val contentAlpha = if (isActive) 1f else 0.45f
 
                 Column {
                     // Collapsed header
@@ -667,16 +888,18 @@ private fun VoiceMappingPanel(
                             text = if (expanded) "\u25BC" else "\u25B6",
                             style = MaterialTheme.typography.bodySmall,
                             modifier = Modifier.width(16.dp),
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = contentAlpha),
                         )
                         Text(
                             text = name,
                             style = MaterialTheme.typography.bodyMedium,
                             modifier = Modifier.weight(1f),
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = contentAlpha),
                         )
                         Text(
                             text = "${settings.voice}($genderIcon) | $roleSummary | x$speedSummary | ${pitchSummary}Hz",
                             style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = contentAlpha),
                         )
                     }
 
