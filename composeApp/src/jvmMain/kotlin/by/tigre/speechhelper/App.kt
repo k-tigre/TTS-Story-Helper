@@ -129,6 +129,7 @@ private fun TokenDialog(
     onSave: (token: String) -> Unit,
 ) {
     var token by remember { mutableStateOf(TokenStorage.iamToken) }
+    var folderId by remember { mutableStateOf(TokenStorage.folderId) }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -142,11 +143,21 @@ private fun TokenDialog(
                     modifier = Modifier.fillMaxWidth(),
                     singleLine = true,
                 )
+                OutlinedTextField(
+                    value = folderId,
+                    onValueChange = { folderId = it },
+                    label = { Text("Folder ID") },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                )
             }
         },
         confirmButton = {
             Button(
-                onClick = { onSave(token) },
+                onClick = {
+                    TokenStorage.folderId = folderId
+                    onSave(token)
+                },
                 enabled = token.isNotBlank(),
             ) {
                 Text("Сохранить")
