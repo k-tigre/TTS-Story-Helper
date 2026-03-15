@@ -1029,6 +1029,10 @@ private fun MainScreen(onTokenRefresh: () -> Unit) {
                                 }
                             }
                         },
+                        onChangeSegmentVoice = { index, newVoiceName ->
+                            segments[index] = segments[index].copy(voiceName = newVoiceName)
+                        },
+                        availableVoiceNames = voiceMapping.keys.toList().sorted(),
                         isLoading = isLoading,
                         modifier = Modifier.weight(1f),
                     )
@@ -1201,6 +1205,8 @@ private fun SegmentsView(
     onSegmentTextChange: (index: Int, newText: String) -> Unit,
     onRemarkupSegment: (index: Int) -> Unit,
     onSplitSegment: (index: Int, parts: List<String>) -> Unit,
+    onChangeSegmentVoice: (index: Int, newVoiceName: String?) -> Unit,
+    availableVoiceNames: List<String>,
     isLoading: Boolean,
     modifier: Modifier = Modifier,
 ) {
@@ -1258,15 +1264,52 @@ private fun SegmentsView(
                             )
                         }
 
-                        // Voice label
-                        Text(
-                            text = segment.voiceName ?: "без голоса",
-                            style = MaterialTheme.typography.titleSmall,
-                            color = if (segment.voiceName != null)
-                                MaterialTheme.colorScheme.primary
-                            else
-                                MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
+                        // Voice label (clickable to change)
+                        Box {
+                            var voiceDropdownExpanded by remember { mutableStateOf(false) }
+                            Text(
+                                text = segment.voiceName ?: "без голоса",
+                                style = MaterialTheme.typography.titleSmall,
+                                color = if (segment.voiceName != null)
+                                    MaterialTheme.colorScheme.primary
+                                else
+                                    MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.clickable { voiceDropdownExpanded = true },
+                            )
+                            DropdownMenu(
+                                expanded = voiceDropdownExpanded,
+                                onDismissRequest = { voiceDropdownExpanded = false },
+                            ) {
+                                DropdownMenuItem(
+                                    text = {
+                                        Text(
+                                            "без голоса",
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        )
+                                    },
+                                    onClick = {
+                                        onChangeSegmentVoice(index, null)
+                                        voiceDropdownExpanded = false
+                                    },
+                                )
+                                availableVoiceNames.forEach { name ->
+                                    DropdownMenuItem(
+                                        text = {
+                                            Text(
+                                                text = name,
+                                                fontWeight = if (name == segment.voiceName)
+                                                    androidx.compose.ui.text.font.FontWeight.Bold
+                                                else null,
+                                            )
+                                        },
+                                        onClick = {
+                                            onChangeSegmentVoice(index, name)
+                                            voiceDropdownExpanded = false
+                                        },
+                                    )
+                                }
+                            }
+                        }
 
                         // Mapped voice info
                         Text(
