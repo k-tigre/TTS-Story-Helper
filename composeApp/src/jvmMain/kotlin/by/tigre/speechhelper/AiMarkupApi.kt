@@ -91,6 +91,33 @@ object AiMarkupApi {
         return "$BASE_SYSTEM_PROMPT\n\nВ книге уже используются следующие голоса: $voicesList. Используй эти же имена голосов для разметки, не придумывай новые без необходимости."
     }
 
+    fun fixDialog(
+        text: String,
+        token: String,
+        folderId: String,
+    ): Flow<MarkupResult> = flow {
+        val model = "gpt://$folderId/deepseek-v32/latest"
+        val chunks = splitTextForAi(text)
+        println("[AiFixDialog] Текст разбит на ${chunks.size} чанк(ов)")
+
+        val results = mutableListOf<String>()
+        for ((i, chunk) in chunks.withIndex()) {
+            emit(MarkupResult.InProgress("Исправление диалогов ${i + 1} из ${chunks.size}"))
+            println("[AiFixDialog] Обработка чанка ${i + 1}/${chunks.size} (${chunk.length} символов)")
+            val result = sendChat(
+                model = model,
+                token = token,
+                messages = listOf(
+                    ChatMessage(role = "system", content = DIALOG_FIX_PROMPT),
+                    ChatMessage(role = "user", content = chunk),
+                ),
+            )
+            results.add(result.replace("```", ""))
+        }
+        println("[AiFixDialog] Все чанки обработаны")
+        emit(MarkupResult.Done(results.joinToString("\n")))
+    }
+
     fun autoMarkup(
         text: String,
         token: String,

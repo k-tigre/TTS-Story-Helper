@@ -682,10 +682,8 @@ private fun MainScreen(onTokenRefresh: () -> Unit) {
                         continue
                     }
 
-                    progressMessage =
-                        "Озвучивание ${index + 1} из ${segments.size}\nголос: ${segment.voiceName ?: "по умолчанию"} → ${settings.voice}"
                     try {
-                        val bytes = SpeechKitApi.synthesize(
+                        SpeechKitApi.synthesize(
                             text = segment.text,
                             voice = settings.voice,
                             role = settings.role.ifBlank { null },
@@ -693,8 +691,14 @@ private fun MainScreen(onTokenRefresh: () -> Unit) {
                             pitchShift = settings.pitchShift,
                             format = "mp3",
                             token = TokenStorage.iamToken,
-                        )
-                        withContext(Dispatchers.IO) { partFile.writeBytes(bytes) }
+                        ).collectLatest { result ->
+                            when (result) {
+                                is SynthesisResult.InProgress ->
+                                    progressMessage = "Озвучивание ${index + 1} из ${segments.size}\nголос: ${segment.voiceName ?: "по умолчанию"} → ${settings.voice}\n${result.message}"
+                                is SynthesisResult.Done ->
+                                    withContext(Dispatchers.IO) { partFile.writeBytes(result.bytes) }
+                            }
+                        }
                     } catch (e: Exception) {
                         errors.add("#${index + 1} ${segment.voiceName ?: "по умолчанию"}: ${e.message}")
                         // Delete failed part so it will be retried next time
@@ -743,7 +747,7 @@ private fun MainScreen(onTokenRefresh: () -> Unit) {
             statusMessage = ""
             progressMessage = "Синтез речи\nголос: $selectedVoice"
             try {
-                val audioBytes = SpeechKitApi.synthesize(
+                SpeechKitApi.synthesize(
                     text = text,
                     voice = selectedVoice,
                     role = selectedRole.ifBlank { null },
@@ -751,13 +755,20 @@ private fun MainScreen(onTokenRefresh: () -> Unit) {
                     pitchShift = pitchShift,
                     format = selectedFormat,
                     token = TokenStorage.iamToken,
-                )
-                val chapterName = chapters.find { it.id == currentChapterId }?.name ?: ""
-                val filePath =
-                    saveAudioFile(audioBytes, selectedFormat, bookName = currentBookName, chapterName = chapterName)
-                SessionStorage.setChapterAudioPath(currentChapterId, filePath)
-                chapterAudioPath = filePath
-                statusMessage = "Сохранено: $filePath"
+                ).collectLatest { result ->
+                    when (result) {
+                        is SynthesisResult.InProgress ->
+                            progressMessage = "Синтез речи\nголос: $selectedVoice\n${result.message}"
+                        is SynthesisResult.Done -> {
+                            val chapterName = chapters.find { it.id == currentChapterId }?.name ?: ""
+                            val filePath =
+                                saveAudioFile(result.bytes, selectedFormat, bookName = currentBookName, chapterName = chapterName)
+                            SessionStorage.setChapterAudioPath(currentChapterId, filePath)
+                            chapterAudioPath = filePath
+                            statusMessage = "Сохранено: $filePath"
+                        }
+                    }
+                }
             } catch (e: Exception) {
                 statusMessage = "Ошибка: ${e.message}"
             } finally {
@@ -1066,15 +1077,14 @@ private fun MainScreen(onTokenRefresh: () -> Unit) {
                                 scope.launch {
                                     try {
                                         val segmentText = segments[index].text
-                                        AiMarkupApi.autoMarkup(
+                                        AiMarkupApi.fixDialog(
                                             text = segmentText,
                                             token = TokenStorage.iamToken,
                                             folderId = folderId,
-                                            existingVoices = voiceMapping.keys.toSet(),
                                         ).collectLatest { result ->
                                             when (result) {
                                                 is MarkupResult.InProgress ->
-                                                    progressMessage = "Переразметка сегмента ${index + 1}\n${result.message}"
+                                                    progressMessage = "Исправление диалогов сегмента ${index + 1}\n${result.message}"
 
                                                 is MarkupResult.Done -> {
                                                     val newSegments = TextParser.parse(result.text)
@@ -1453,7 +1463,7 @@ private fun SegmentsView(
                                     playingIndex = index
                                     scope.launch {
                                         try {
-                                            val wavBytes = SpeechKitApi.synthesize(
+                                            SpeechKitApi.synthesize(
                                                 text = segment.text,
                                                 voice = settings.voice,
                                                 role = settings.role.ifBlank { null },
@@ -1461,8 +1471,12 @@ private fun SegmentsView(
                                                 pitchShift = settings.pitchShift,
                                                 format = "wav",
                                                 token = TokenStorage.iamToken,
-                                            )
-                                            AudioPlayer.play(wavBytes)
+                                            ).collectLatest { result ->
+                                                when (result) {
+                                                    is SynthesisResult.InProgress -> {}
+                                                    is SynthesisResult.Done -> AudioPlayer.play(result.bytes)
+                                                }
+                                            }
                                         } catch (e: Exception) {
                                             playError = "#${index + 1}: ${e.message}"
                                         } finally {

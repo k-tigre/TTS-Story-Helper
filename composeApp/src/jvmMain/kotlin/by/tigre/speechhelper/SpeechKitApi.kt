@@ -5,8 +5,15 @@ import io.ktor.client.engine.cio.*
 import io.ktor.client.request.*
 import io.ktor.client.statement.*
 import io.ktor.http.*
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.flow
 import java.io.ByteArrayOutputStream
 import java.util.Base64
+
+sealed class SynthesisResult {
+    data class InProgress(val message: String) : SynthesisResult()
+    data class Done(val bytes: ByteArray) : SynthesisResult()
+}
 
 object SpeechKitApi {
     private const val ENDPOINT = "https://tts.api.cloud.yandex.net:443/tts/v3/utteranceSynthesis"
@@ -14,7 +21,7 @@ object SpeechKitApi {
 
     private val client = HttpClient(CIO)
 
-    suspend fun synthesize(
+    fun synthesize(
         text: String,
         voice: String,
         role: String?,
@@ -22,18 +29,23 @@ object SpeechKitApi {
         pitchShift: Double,
         format: String,
         token: String,
-    ): ByteArray {
+    ): Flow<SynthesisResult> = flow {
         val chunks = splitText(text)
+
         if (chunks.size == 1) {
-            return synthesizeChunk(chunks[0], voice, role, speed, pitchShift, format, token)
+            emit(SynthesisResult.InProgress("Синтез речи..."))
+            val bytes = synthesizeChunk(chunks[0], voice, role, speed, pitchShift, format, token)
+            emit(SynthesisResult.Done(bytes))
+            return@flow
         }
 
         val output = ByteArrayOutputStream()
-        for (chunk in chunks) {
+        for ((i, chunk) in chunks.withIndex()) {
+            emit(SynthesisResult.InProgress("Синтез речи: чанк ${i + 1} из ${chunks.size}"))
             val bytes = synthesizeChunk(chunk, voice, role, speed, pitchShift, format, token)
             output.write(bytes)
         }
-        return output.toByteArray()
+        emit(SynthesisResult.Done(output.toByteArray()))
     }
 
     private suspend fun synthesizeChunk(
