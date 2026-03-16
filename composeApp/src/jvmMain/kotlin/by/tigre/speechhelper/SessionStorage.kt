@@ -134,6 +134,20 @@ object SessionStorage {
             )
         }
 
+    fun getChapterAudioPath(id: String): String? {
+        val f = File(chapterDir(id), "audio_path.txt")
+        return if (f.exists()) f.readText().trim().ifBlank { null } else null
+    }
+
+    fun setChapterAudioPath(id: String, path: String) {
+        File(chapterDir(id), "audio_path.txt").writeText(path)
+    }
+
+    fun clearChapterAudioPath(id: String) {
+        val f = File(chapterDir(id), "audio_path.txt")
+        if (f.exists()) f.delete()
+    }
+
     fun getChapterCacheDir(id: String): File {
         return File(System.getProperty("user.home"), "SpeechHelper/cache/$id").apply { mkdirs() }
     }

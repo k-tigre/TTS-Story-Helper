@@ -2,6 +2,7 @@ package by.tigre.speechhelper
 
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.clickable
+import androidx.compose.ui.draw.alpha
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -46,6 +47,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
@@ -58,8 +60,10 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.FlowPreview
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.debounce
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -543,6 +547,16 @@ private fun MainScreen(onTokenRefresh: () -> Unit) {
     var progressMessage by remember { mutableStateOf("") }
     var statusMessage by remember { mutableStateOf("") }
 
+    // Chapter audio player
+    var chapterAudioPath by remember<MutableState<String?>>(currentChapterId) {
+        mutableStateOf(SessionStorage.getChapterAudioPath(currentChapterId))
+    }
+    val chapterPlayer = remember<ChapterAudioPlayer> { ChapterAudioPlayer() }
+    var playerIsPlaying by remember { mutableStateOf(false) }
+    var playerPositionMs by remember { mutableStateOf(0L) }
+    var playerDurationMs by remember { mutableStateOf(0L) }
+    var playerReady by remember { mutableStateOf(false) }
+
     // Voice mapping is global (shared across all chapters)
     val voiceMapping = remember { mutableStateMapOf<String, VoiceSettings>() }
 
@@ -566,6 +580,8 @@ private fun MainScreen(onTokenRefresh: () -> Unit) {
     fun switchToChapter(id: String) {
         if (id == currentChapterId) return
         saveCurrentChapter()
+        chapterPlayer.close()
+        playerIsPlaying = false
         currentChapterId = id
         SessionStorage.currentChapterId = id
         statusMessage = ""
@@ -699,6 +715,8 @@ private fun MainScreen(onTokenRefresh: () -> Unit) {
                     val combined = allParts.reduce { acc, bytes -> acc + bytes }
                     val chapterName = chapters.find { it.id == currentChapterId }?.name ?: ""
                     val filePath = saveAudioFile(combined, "mp3", bookName = currentBookName, chapterName = chapterName)
+                    SessionStorage.setChapterAudioPath(currentChapterId, filePath)
+                    chapterAudioPath = filePath
                     val successCount = allParts.size
                     val totalCount = segments.size
                     statusMessage = if (errors.isEmpty()) {
@@ -737,6 +755,8 @@ private fun MainScreen(onTokenRefresh: () -> Unit) {
                 val chapterName = chapters.find { it.id == currentChapterId }?.name ?: ""
                 val filePath =
                     saveAudioFile(audioBytes, selectedFormat, bookName = currentBookName, chapterName = chapterName)
+                SessionStorage.setChapterAudioPath(currentChapterId, filePath)
+                chapterAudioPath = filePath
                 statusMessage = "Сохранено: $filePath"
             } catch (e: Exception) {
                 statusMessage = "Ошибка: ${e.message}"
@@ -744,6 +764,39 @@ private fun MainScreen(onTokenRefresh: () -> Unit) {
                 isLoading = false
                 progressMessage = ""
             }
+        }
+    }
+
+    // Load audio when chapter changes or audio path changes
+    LaunchedEffect(currentChapterId, chapterAudioPath) {
+        playerIsPlaying = false
+        playerPositionMs = 0L
+        playerDurationMs = 0L
+        playerReady = false
+        chapterPlayer.close()
+        val path = chapterAudioPath
+        if (path != null && File(path).exists()) {
+            try {
+                chapterPlayer.open(path) {
+                    playerIsPlaying = false
+                    playerPositionMs = 0L
+                }
+                playerDurationMs = chapterPlayer.durationMs
+                playerReady = true
+            } catch (_: Exception) {
+                playerReady = false
+            }
+        }
+    }
+
+    // Update position while playing
+    LaunchedEffect(playerIsPlaying) {
+        if (playerIsPlaying) {
+            while (isActive && chapterPlayer.isPlaying) {
+                playerPositionMs = chapterPlayer.currentPositionMs
+                delay(200)
+            }
+            playerIsPlaying = chapterPlayer.isPlaying
         }
     }
 
@@ -1206,6 +1259,27 @@ private fun MainScreen(onTokenRefresh: () -> Unit) {
                 }
 
             }
+
+            // Chapter audio player
+            ChapterPlayerBar(
+                isReady = playerReady,
+                isPlaying = playerIsPlaying,
+                positionMs = playerPositionMs,
+                durationMs = playerDurationMs,
+                onPlayPause = {
+                    if (playerIsPlaying) {
+                        chapterPlayer.pause()
+                        playerIsPlaying = false
+                    } else {
+                        chapterPlayer.play()
+                        playerIsPlaying = true
+                    }
+                },
+                onSeek = { posMs ->
+                    chapterPlayer.seekTo(posMs)
+                    playerPositionMs = posMs
+                },
+            )
 
             if (statusMessage.isNotBlank()) {
                 Text(
@@ -1698,6 +1772,63 @@ private fun DropdownSelector(
             }
         }
     }
+}
+
+@Composable
+private fun ChapterPlayerBar(
+    isReady: Boolean,
+    isPlaying: Boolean,
+    positionMs: Long,
+    durationMs: Long,
+    onPlayPause: () -> Unit,
+    onSeek: (Long) -> Unit,
+) {
+    val alpha = if (isReady) 1f else 0.4f
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        IconButton(
+            onClick = onPlayPause,
+            enabled = isReady,
+        ) {
+            Text(
+                text = if (isPlaying) "\u23F8" else "\u25B6",
+                style = MaterialTheme.typography.titleMedium,
+                modifier = Modifier.alpha(alpha),
+            )
+        }
+
+        Text(
+            text = formatTime(positionMs),
+            style = MaterialTheme.typography.bodySmall,
+            modifier = Modifier.width(48.dp).alpha(alpha),
+            textAlign = TextAlign.End,
+        )
+
+        Slider(
+            value = if (durationMs > 0) positionMs.toFloat() / durationMs.toFloat() else 0f,
+            onValueChange = { fraction ->
+                onSeek((fraction * durationMs).toLong())
+            },
+            enabled = isReady,
+            modifier = Modifier.weight(1f),
+        )
+
+        Text(
+            text = formatTime(durationMs),
+            style = MaterialTheme.typography.bodySmall,
+            modifier = Modifier.width(48.dp).alpha(alpha),
+        )
+    }
+}
+
+private fun formatTime(ms: Long): String {
+    val totalSeconds = ms / 1000
+    val minutes = totalSeconds / 60
+    val seconds = totalSeconds % 60
+    return "%d:%02d".format(minutes, seconds)
 }
 
 private suspend fun saveAudioFile(
