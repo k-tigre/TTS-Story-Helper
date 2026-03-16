@@ -51,6 +51,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -133,7 +134,7 @@ private fun TokenDialog(
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Настройки API") },
+        title = { Text("Настройки") },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 OutlinedTextField(
@@ -142,6 +143,7 @@ private fun TokenDialog(
                     label = { Text("API Key") },
                     modifier = Modifier.fillMaxWidth(),
                     singleLine = true,
+                    visualTransformation = PasswordVisualTransformation(),
                 )
                 OutlinedTextField(
                     value = folderId,
@@ -943,8 +945,8 @@ private fun MainScreen(onTokenRefresh: () -> Unit) {
                     ) {
                         Text("Очистить всё")
                     }
-                    TextButton(onClick = onTokenRefresh) {
-                        Text("Обновить токен")
+                    IconButton(onClick = onTokenRefresh) {
+                        Text("\u2699", style = MaterialTheme.typography.titleLarge)
                     }
                 }
             )
