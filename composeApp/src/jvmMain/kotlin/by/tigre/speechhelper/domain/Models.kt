@@ -46,10 +46,18 @@ val API_VOICES = API_VOICES_INFO.map { it.id }
 
 val FORMATS = listOf("mp3", "ogg", "wav")
 
+enum class LlmProvider(val label: String, val defaultBaseUrl: String) {
+    OpenAI("OpenAI", "https://api.openai.com/v1"),
+    Ollama("Ollama", "http://localhost:11434/v1"),
+    LMStudio("LM Studio", "http://localhost:1234/v1"),
+    YandexCloud("Yandex Cloud", "https://ai.api.cloud.yandex.net/v1"),
+}
+
 data class LlmConfig(
+    val provider: LlmProvider = LlmProvider.OpenAI,
     val baseUrl: String = "",
     val apiKey: String = "",
     val model: String = "",
 ) {
-    val isConfigured: Boolean get() = baseUrl.isNotBlank() && model.isNotBlank()
+    val isConfigured: Boolean get() = model.isNotBlank()
 }

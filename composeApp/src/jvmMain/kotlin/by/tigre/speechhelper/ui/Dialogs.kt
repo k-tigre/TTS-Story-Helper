@@ -1,6 +1,7 @@
 package by.tigre.speechhelper.ui
 
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -11,7 +12,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.ClickableText
@@ -21,6 +22,8 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.IconButton
@@ -32,8 +35,10 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -49,10 +54,13 @@ import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import by.tigre.speechhelper.TokenStorage
+import by.tigre.speechhelper.data.LlmModelsApi
 import by.tigre.speechhelper.data.SessionStorage
 import by.tigre.speechhelper.domain.LlmConfig
 import java.awt.Desktop
 import java.net.URI
+import by.tigre.speechhelper.domain.LlmProvider
+import kotlinx.coroutines.launch
 
 private data class LlmPreset(val label: String, val baseUrl: String, val model: String)
 
@@ -63,20 +71,61 @@ private val LLM_PRESETS = listOf(
     LlmPreset("Yandex AI", "https://ai.api.cloud.yandex.net/v1", ""),
 )
 
-
 @Composable
 fun TokenDialog(
     onDismiss: () -> Unit,
     onSave: (token: String) -> Unit,
     onOpenHelp: () -> Unit = {},
 ) {
+    val scope = rememberCoroutineScope()
+
     var token by remember { mutableStateOf(TokenStorage.iamToken) }
     var folderId by remember { mutableStateOf(TokenStorage.folderId) }
+
     val savedLlm = remember { TokenStorage.llmConfig }
-    var llmBaseUrl by remember { mutableStateOf(savedLlm.baseUrl) }
+    var llmProvider by remember { mutableStateOf(savedLlm.provider) }
+    var llmBaseUrl by remember { mutableStateOf(savedLlm.baseUrl.ifBlank { savedLlm.provider.defaultBaseUrl }) }
     var llmApiKey by remember { mutableStateOf(savedLlm.apiKey) }
     var llmModel by remember { mutableStateOf(savedLlm.model) }
     val linkColor = Color(0xFF1976D2)
+
+    val availableModels = remember { mutableStateListOf<String>() }
+    var isLoadingModels by remember { mutableStateOf(false) }
+    var modelsError by remember { mutableStateOf("") }
+    var modelDropdownExpanded by remember { mutableStateOf(false) }
+
+    fun onProviderSelected(provider: LlmProvider) {
+        llmProvider = provider
+        llmBaseUrl = provider.defaultBaseUrl
+        if (provider != savedLlm.provider) {
+            llmModel = ""
+        }
+        availableModels.clear()
+        modelsError = ""
+    }
+
+    fun connectAndFetchModels() {
+        scope.launch {
+            isLoadingModels = true
+            modelsError = ""
+            availableModels.clear()
+            try {
+                val config = LlmConfig(
+                    provider = llmProvider,
+                    baseUrl = llmBaseUrl.trim(),
+                    apiKey = llmApiKey.trim(),
+                    model = "",
+                )
+                val models = LlmModelsApi.fetchModels(config, folderId)
+                availableModels.addAll(models)
+                if (models.isEmpty()) modelsError = "Моделей не найдено"
+            } catch (e: Exception) {
+                modelsError = "Ошибка: ${e.message}"
+            } finally {
+                isLoadingModels = false
+            }
+        }
+    }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -86,6 +135,7 @@ fun TokenDialog(
                 modifier = Modifier.verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
+                // ── Yandex SpeechKit ──────────────────────────────────────
                 Text("Yandex SpeechKit", style = MaterialTheme.typography.titleSmall)
                 OutlinedTextField(
                     value = token,
@@ -118,43 +168,125 @@ fun TokenDialog(
 
                 HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
 
+                // ── LLM ───────────────────────────────────────────────────
                 Text("LLM для авто-разметки", style = MaterialTheme.typography.titleSmall)
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    for (preset in LLM_PRESETS) {
-                        OutlinedButton(
-                            onClick = {
-                                llmBaseUrl = preset.baseUrl
-                                if (preset.model.isNotBlank()) llmModel = preset.model
-                            },
-                            modifier = Modifier.width(90.dp),
-                        ) {
-                            Text(preset.label, maxLines = 1, style = MaterialTheme.typography.labelSmall)
+
+                // Provider selector
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    LlmProvider.entries.forEach { provider ->
+                        val selected = provider == llmProvider
+                        if (selected) {
+                            Button(onClick = {}) {
+                                Text(provider.label, style = MaterialTheme.typography.labelSmall)
+                            }
+                        } else {
+                            OutlinedButton(onClick = { onProviderSelected(provider) }) {
+                                Text(provider.label, style = MaterialTheme.typography.labelSmall)
+                            }
                         }
                     }
                 }
-                OutlinedTextField(
-                    value = llmBaseUrl,
-                    onValueChange = { llmBaseUrl = it },
-                    label = { Text("Base URL") },
-                    placeholder = { Text("https://api.openai.com/v1") },
-                    modifier = Modifier.fillMaxWidth(),
-                    singleLine = true,
-                )
-                OutlinedTextField(
-                    value = llmApiKey,
-                    onValueChange = { llmApiKey = it },
-                    label = { Text("API Key (пусто для локальных)") },
-                    modifier = Modifier.fillMaxWidth(),
-                    singleLine = true,
-                )
-                OutlinedTextField(
-                    value = llmModel,
-                    onValueChange = { llmModel = it },
-                    label = { Text("Модель") },
-                    placeholder = { Text("gpt-4o / llama3.2") },
-                    modifier = Modifier.fillMaxWidth(),
-                    singleLine = true,
-                )
+
+                // Provider-specific fields
+                when (llmProvider) {
+                    LlmProvider.OpenAI -> {
+                        OutlinedTextField(
+                            value = llmBaseUrl,
+                            onValueChange = { llmBaseUrl = it },
+                            label = { Text("URL") },
+                            modifier = Modifier.fillMaxWidth(),
+                            singleLine = true,
+                        )
+                        OutlinedTextField(
+                            value = llmApiKey,
+                            onValueChange = { llmApiKey = it },
+                            label = { Text("API Key") },
+                            modifier = Modifier.fillMaxWidth(),
+                            singleLine = true,
+                            visualTransformation = PasswordVisualTransformation(),
+                        )
+                    }
+                    LlmProvider.Ollama, LlmProvider.LMStudio -> {
+                        OutlinedTextField(
+                            value = llmBaseUrl,
+                            onValueChange = { llmBaseUrl = it },
+                            label = { Text("URL") },
+                            modifier = Modifier.fillMaxWidth(),
+                            singleLine = true,
+                        )
+                        OutlinedTextField(
+                            value = llmApiKey,
+                            onValueChange = { llmApiKey = it },
+                            label = { Text("API Token (опционально)") },
+                            modifier = Modifier.fillMaxWidth(),
+                            singleLine = true,
+                        )
+                    }
+                    LlmProvider.YandexCloud -> {
+                        Text(
+                            "Folder ID: ${folderId.ifBlank { "(не задан выше)" }}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+
+                // Connect button + model dropdown
+                val canConnect = when (llmProvider) {
+                    LlmProvider.OpenAI -> llmBaseUrl.isNotBlank() && llmApiKey.isNotBlank()
+                    LlmProvider.Ollama, LlmProvider.LMStudio -> llmBaseUrl.isNotBlank()
+                    LlmProvider.YandexCloud -> folderId.isNotBlank()
+                }
+
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    OutlinedButton(
+                        onClick = { connectAndFetchModels() },
+                        enabled = canConnect && !isLoadingModels,
+                    ) {
+                        Text("Подключить")
+                    }
+
+                    if (isLoadingModels) {
+                        CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
+                    }
+
+                    if (availableModels.isNotEmpty()) {
+                        Box {
+                            OutlinedButton(onClick = { modelDropdownExpanded = true }) {
+                                Text(llmModel.ifBlank { "Выбрать модель" }, maxLines = 1)
+                            }
+                            DropdownMenu(
+                                expanded = modelDropdownExpanded,
+                                onDismissRequest = { modelDropdownExpanded = false },
+                            ) {
+                                availableModels.forEach { model ->
+                                    DropdownMenuItem(
+                                        text = { Text(model) },
+                                        onClick = {
+                                            llmModel = model
+                                            modelDropdownExpanded = false
+                                        },
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if (modelsError.isNotBlank()) {
+                    Text(modelsError, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+                }
+
+                if (llmModel.isNotBlank()) {
+                    Text(
+                        "Модель: $llmModel",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.primary,
+                    )
+                }
             }
         },
         confirmButton = {
@@ -162,6 +294,7 @@ fun TokenDialog(
                 onClick = {
                     TokenStorage.folderId = folderId
                     TokenStorage.llmConfig = LlmConfig(
+                        provider = llmProvider,
                         baseUrl = llmBaseUrl.trim(),
                         apiKey = llmApiKey.trim(),
                         model = llmModel.trim(),

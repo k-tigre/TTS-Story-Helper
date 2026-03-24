@@ -1,6 +1,8 @@
 package by.tigre.speechhelper.data
 
+import by.tigre.speechhelper.TokenStorage
 import by.tigre.speechhelper.domain.LlmConfig
+import by.tigre.speechhelper.domain.LlmProvider
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.cio.CIO
 import io.ktor.client.plugins.contentnegotiation.ContentNegotiation
@@ -181,18 +183,30 @@ object OpenAiMarkupApi {
         messages: List<OaiChatMessage>,
     ): String {
         val endpoint = config.baseUrl.trimEnd('/') + "/chat/completions"
+
+        // For Yandex Cloud: construct full model URI and use Api-Key auth
+        val resolvedModel = if (config.provider == LlmProvider.YandexCloud) {
+            "gpt://${TokenStorage.folderId}/${config.model}/latest"
+        } else {
+            config.model
+        }
+
         val request = OaiChatRequest(
-            model = config.model,
+            model = resolvedModel,
             messages = messages,
             temperature = 0.5,
         )
 
-        println("[OpenAiMarkup] -> POST $endpoint (model=${config.model})")
+        println("[OpenAiMarkup] -> POST $endpoint (model=$resolvedModel)")
 
         val response = client.post {
             url(endpoint)
-            if (config.apiKey.isNotBlank()) {
-                header(HttpHeaders.Authorization, "Bearer ${config.apiKey}")
+            when (config.provider) {
+                LlmProvider.YandexCloud ->
+                    header(HttpHeaders.Authorization, "Api-Key ${TokenStorage.iamToken}")
+                else ->
+                    if (config.apiKey.isNotBlank())
+                        header(HttpHeaders.Authorization, "Bearer ${config.apiKey}")
             }
             contentType(ContentType.Application.Json)
             setBody(request)

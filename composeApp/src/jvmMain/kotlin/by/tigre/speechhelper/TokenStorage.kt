@@ -1,6 +1,7 @@
 package by.tigre.speechhelper
 
 import by.tigre.speechhelper.domain.LlmConfig
+import by.tigre.speechhelper.domain.LlmProvider
 import java.util.prefs.Preferences
 
 object TokenStorage {
@@ -8,6 +9,7 @@ object TokenStorage {
 
     private const val KEY_IAM_TOKEN = "iam_token"
     private const val KEY_FOLDER_ID = "folder_id_id"
+    private const val KEY_LLM_PROVIDER = "llm_provider"
     private const val KEY_LLM_BASE_URL = "llm_base_url"
     private const val KEY_LLM_API_KEY = "llm_api_key"
     private const val KEY_LLM_MODEL = "llm_model"
@@ -30,11 +32,13 @@ object TokenStorage {
 
     var llmConfig: LlmConfig
         get() = LlmConfig(
+            provider = runCatching { LlmProvider.valueOf(prefs.get(KEY_LLM_PROVIDER, "")) }.getOrDefault(LlmProvider.OpenAI),
             baseUrl = prefs.get(KEY_LLM_BASE_URL, ""),
             apiKey = prefs.get(KEY_LLM_API_KEY, ""),
             model = prefs.get(KEY_LLM_MODEL, ""),
         )
         set(value) {
+            prefs.put(KEY_LLM_PROVIDER, value.provider.name)
             prefs.put(KEY_LLM_BASE_URL, value.baseUrl)
             prefs.put(KEY_LLM_API_KEY, value.apiKey)
             prefs.put(KEY_LLM_MODEL, value.model)
