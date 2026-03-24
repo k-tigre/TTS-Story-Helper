@@ -1,5 +1,6 @@
 package by.tigre.speechhelper
 
+import by.tigre.speechhelper.domain.LlmConfig
 import java.util.prefs.Preferences
 
 object TokenStorage {
@@ -7,6 +8,9 @@ object TokenStorage {
 
     private const val KEY_IAM_TOKEN = "iam_token"
     private const val KEY_FOLDER_ID = "folder_id_id"
+    private const val KEY_LLM_BASE_URL = "llm_base_url"
+    private const val KEY_LLM_API_KEY = "llm_api_key"
+    private const val KEY_LLM_MODEL = "llm_model"
     private const val KEY_FIRST_LAUNCH = "first_launch_done"
 
     var iamToken: String
@@ -23,6 +27,18 @@ object TokenStorage {
     fun markFirstLaunchDone() {
         prefs.putBoolean(KEY_FIRST_LAUNCH, true)
     }
+
+    var llmConfig: LlmConfig
+        get() = LlmConfig(
+            baseUrl = prefs.get(KEY_LLM_BASE_URL, ""),
+            apiKey = prefs.get(KEY_LLM_API_KEY, ""),
+            model = prefs.get(KEY_LLM_MODEL, ""),
+        )
+        set(value) {
+            prefs.put(KEY_LLM_BASE_URL, value.baseUrl)
+            prefs.put(KEY_LLM_API_KEY, value.apiKey)
+            prefs.put(KEY_LLM_MODEL, value.model)
+        }
 
     fun hasCredentials(): Boolean = iamToken.isNotBlank()
 

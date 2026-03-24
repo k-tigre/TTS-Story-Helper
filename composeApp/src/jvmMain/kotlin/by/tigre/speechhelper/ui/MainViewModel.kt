@@ -12,10 +12,12 @@ import by.tigre.speechhelper.data.EpubParser
 import by.tigre.speechhelper.data.Fb2Parser
 import by.tigre.speechhelper.data.ParsedBook
 import by.tigre.speechhelper.data.MarkupResult
+import by.tigre.speechhelper.data.OpenAiMarkupApi
 import by.tigre.speechhelper.data.LocalTtsApi
 import by.tigre.speechhelper.data.SessionStorage
 import by.tigre.speechhelper.data.SpeechSynthesizer
 import by.tigre.speechhelper.data.SynthesisResult
+import by.tigre.speechhelper.domain.LlmConfig
 import by.tigre.speechhelper.data.WavMerge
 import by.tigre.speechhelper.domain.API_VOICES
 import by.tigre.speechhelper.domain.FORMATS
@@ -665,6 +667,14 @@ class MainViewModel(private val scope: CoroutineScope) {
             SessionStorage.getChapterText(id).isNotBlank()
         }
         if (distinct.isEmpty() || isLoading) return
+        val llmConfig = TokenStorage.llmConfig
+        if (llmConfig.isConfigured) {
+            pendingMarkupChapterIds = distinct
+            showFolderIdDialog = true
+            launchAutoMarkupWithLlm(llmConfig)
+            return
+        }
+
         if (TokenStorage.folderId.isBlank()) {
             pendingMarkupChapterIds = distinct
             showFolderIdDialog = true
@@ -739,21 +749,53 @@ class MainViewModel(private val scope: CoroutineScope) {
             else -> "глав"
         }
 
-    fun remarkupSegment(index: Int) {
-        val folderId = TokenStorage.folderId
-        if (folderId.isBlank()) {
-            showFolderIdDialog = true
-            return
+    private fun launchAutoMarkupWithLlm(config: LlmConfig) {
+        isLoading = true
+        progressMessage = "Авто-разметка (${config.model})..."
+        statusMessage = ""
+        scope.launch {
+            try {
+                OpenAiMarkupApi.autoMarkup(
+                    text = text,
+                    config = config,
+                    existingVoices = voiceMapping.keys.toSet(),
+                ).collectLatest { result ->
+                    when (result) {
+                        is MarkupResult.InProgress -> progressMessage = result.message
+                        is MarkupResult.Done -> {
+                            text = result.text
+                            saveCurrentChapter()
+                            statusMessage = "Авто-разметка завершена (${config.model})"
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                statusMessage = "Ошибка авто-разметки: ${e.message}"
+                e.printStackTrace()
+            } finally {
+                isLoading = false
+                progressMessage = ""
+            }
         }
+    }
+
+    fun remarkupSegment(index: Int) {
         if (isLoading) return
+        val llmConfig = TokenStorage.llmConfig
+        val markupFlow = if (llmConfig.isConfigured) {
+            OpenAiMarkupApi.fixDialog(text = segments[index].text, config = llmConfig)
+        } else {
+            val folderId = TokenStorage.folderId
+            if (folderId.isBlank()) {
+                showFolderIdDialog = true
+                return
+            }
+            AiMarkupApi.fixDialog(text = segments[index].text, token = TokenStorage.iamToken, folderId = folderId)
+        }
         isLoading = true
         scope.launch {
             try {
-                AiMarkupApi.fixDialog(
-                    text = segments[index].text,
-                    token = TokenStorage.iamToken,
-                    folderId = folderId,
-                ).collectLatest { result ->
+                markupFlow.collectLatest { result ->
                     when (result) {
                         is MarkupResult.InProgress ->
                             progressMessage = "Исправление диалогов сегмента ${index + 1}\n${result.message}"

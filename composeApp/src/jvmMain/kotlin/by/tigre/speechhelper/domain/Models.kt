@@ -45,3 +45,11 @@ val API_VOICES_INFO = listOf(
 val API_VOICES = API_VOICES_INFO.map { it.id }
 
 val FORMATS = listOf("mp3", "ogg", "wav")
+
+data class LlmConfig(
+    val baseUrl: String = "",
+    val apiKey: String = "",
+    val model: String = "",
+) {
+    val isConfigured: Boolean get() = baseUrl.isNotBlank() && model.isNotBlank()
+}

@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.ClickableText
@@ -21,8 +22,10 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -47,8 +50,19 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import by.tigre.speechhelper.TokenStorage
 import by.tigre.speechhelper.data.SessionStorage
+import by.tigre.speechhelper.domain.LlmConfig
 import java.awt.Desktop
 import java.net.URI
+
+private data class LlmPreset(val label: String, val baseUrl: String, val model: String)
+
+private val LLM_PRESETS = listOf(
+    LlmPreset("OpenAI", "https://api.openai.com/v1", "gpt-4o"),
+    LlmPreset("Ollama", "http://localhost:11434/v1", "llama3.2"),
+    LlmPreset("LM Studio", "http://localhost:1234/v1", ""),
+    LlmPreset("Yandex AI", "https://ai.api.cloud.yandex.net/v1", ""),
+)
+
 
 @Composable
 fun TokenDialog(
@@ -58,13 +72,21 @@ fun TokenDialog(
 ) {
     var token by remember { mutableStateOf(TokenStorage.iamToken) }
     var folderId by remember { mutableStateOf(TokenStorage.folderId) }
+    val savedLlm = remember { TokenStorage.llmConfig }
+    var llmBaseUrl by remember { mutableStateOf(savedLlm.baseUrl) }
+    var llmApiKey by remember { mutableStateOf(savedLlm.apiKey) }
+    var llmModel by remember { mutableStateOf(savedLlm.model) }
     val linkColor = Color(0xFF1976D2)
 
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("Настройки") },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Column(
+                modifier = Modifier.verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                Text("Yandex SpeechKit", style = MaterialTheme.typography.titleSmall)
                 OutlinedTextField(
                     value = token,
                     onValueChange = { token = it },
@@ -93,12 +115,57 @@ fun TokenDialog(
                         style = MaterialTheme.typography.bodySmall.copy(textDecoration = TextDecoration.Underline),
                     )
                 }
+
+                HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
+
+                Text("LLM для авто-разметки", style = MaterialTheme.typography.titleSmall)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    for (preset in LLM_PRESETS) {
+                        OutlinedButton(
+                            onClick = {
+                                llmBaseUrl = preset.baseUrl
+                                if (preset.model.isNotBlank()) llmModel = preset.model
+                            },
+                            modifier = Modifier.width(90.dp),
+                        ) {
+                            Text(preset.label, maxLines = 1, style = MaterialTheme.typography.labelSmall)
+                        }
+                    }
+                }
+                OutlinedTextField(
+                    value = llmBaseUrl,
+                    onValueChange = { llmBaseUrl = it },
+                    label = { Text("Base URL") },
+                    placeholder = { Text("https://api.openai.com/v1") },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                )
+                OutlinedTextField(
+                    value = llmApiKey,
+                    onValueChange = { llmApiKey = it },
+                    label = { Text("API Key (пусто для локальных)") },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                )
+                OutlinedTextField(
+                    value = llmModel,
+                    onValueChange = { llmModel = it },
+                    label = { Text("Модель") },
+                    placeholder = { Text("gpt-4o / llama3.2") },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                )
             }
         },
         confirmButton = {
             Button(
                 onClick = {
                     TokenStorage.folderId = folderId
+                    TokenStorage.llmConfig = LlmConfig(
+                        baseUrl = llmBaseUrl.trim(),
+                        apiKey = llmApiKey.trim(),
+                        model = llmModel.trim(),
+                    )
                     onSave(token)
                 },
                 enabled = token.isNotBlank(),
