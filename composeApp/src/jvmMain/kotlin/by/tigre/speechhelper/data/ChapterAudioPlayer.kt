@@ -1,4 +1,4 @@
-package by.tigre.speechhelper
+package by.tigre.speechhelper.data
 
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext

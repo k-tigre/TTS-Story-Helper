@@ -1,4 +1,4 @@
-package by.tigre.speechhelper
+package by.tigre.speechhelper.domain
 
 data class TextSegment(
     val voiceName: String?,

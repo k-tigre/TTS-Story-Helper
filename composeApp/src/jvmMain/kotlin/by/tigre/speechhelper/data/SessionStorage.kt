@@ -1,10 +1,10 @@
-package by.tigre.speechhelper
+package by.tigre.speechhelper.data
 
+import by.tigre.speechhelper.domain.ChapterInfo
+import by.tigre.speechhelper.domain.VoiceSettings
 import java.io.File
 import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
-
-data class ChapterInfo(val id: String, val name: String)
 
 object SessionStorage {
     private val dir = File(System.getProperty("user.home"), ".speechhelper").apply { mkdirs() }
