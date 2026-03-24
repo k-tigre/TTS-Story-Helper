@@ -8,6 +8,9 @@ import androidx.compose.runtime.setValue
 import by.tigre.speechhelper.TokenStorage
 import by.tigre.speechhelper.data.AiMarkupApi
 import by.tigre.speechhelper.data.ChapterAudioPlayer
+import by.tigre.speechhelper.data.EpubParser
+import by.tigre.speechhelper.data.Fb2Parser
+import by.tigre.speechhelper.data.ParsedBook
 import by.tigre.speechhelper.data.MarkupResult
 import by.tigre.speechhelper.data.SessionStorage
 import by.tigre.speechhelper.data.SpeechKitApi
@@ -25,6 +28,8 @@ import kotlinx.coroutines.withContext
 import java.io.File
 import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
+import javax.swing.JFileChooser
+import javax.swing.filechooser.FileNameExtensionFilter
 
 class MainViewModel(private val scope: CoroutineScope) {
 
@@ -183,6 +188,77 @@ class MainViewModel(private val scope: CoroutineScope) {
             statusMessage = "Ошибка: не удалось загрузить книгу"
         }
         showLoadBookDialog = false
+    }
+
+    fun importFb2() {
+        scope.launch {
+            val file = withContext(Dispatchers.IO) {
+                val chooser = JFileChooser().apply {
+                    dialogTitle = "Выбрать FB2 файл"
+                    fileFilter = FileNameExtensionFilter("FictionBook 2 (*.fb2)", "fb2")
+                }
+                if (chooser.showOpenDialog(null) == JFileChooser.APPROVE_OPTION) chooser.selectedFile else null
+            }
+            if (file == null) return@launch
+            importParsedBook(label = "FB2") { Fb2Parser.parse(file) }
+        }
+    }
+
+    fun importEpub() {
+        scope.launch {
+            val file = withContext(Dispatchers.IO) {
+                val chooser = JFileChooser().apply {
+                    dialogTitle = "Выбрать EPUB файл"
+                    fileFilter = FileNameExtensionFilter("EPUB (*.epub)", "epub")
+                }
+                if (chooser.showOpenDialog(null) == JFileChooser.APPROVE_OPTION) chooser.selectedFile else null
+            }
+            if (file == null) return@launch
+            importParsedBook(label = "EPUB") { EpubParser.parse(file) }
+        }
+    }
+
+    private suspend fun importParsedBook(label: String, parse: suspend () -> ParsedBook) {
+        isLoading = true
+        progressMessage = "Чтение $label..."
+        try {
+            val book = withContext(Dispatchers.IO) { parse() }
+            if (book.chapters.isEmpty()) {
+                statusMessage = "Ошибка: не найдены главы в файле"
+                return
+            }
+
+            saveCurrentChapter()
+            withContext(Dispatchers.IO) { SessionStorage.clearAllData() }
+
+            var firstId: String? = null
+            book.chapters.forEachIndexed { index, chapter ->
+                progressMessage = "Создание главы ${index + 1} из ${book.chapters.size}..."
+                val id = withContext(Dispatchers.IO) {
+                    val id = SessionStorage.createChapter(chapter.name)
+                    SessionStorage.setChapterText(id, chapter.text)
+                    id
+                }
+                if (firstId == null) firstId = id
+            }
+
+            chapters = SessionStorage.listChapters()
+            val id = firstId ?: SessionStorage.ensureCurrentChapter()
+            currentChapterId = id
+            SessionStorage.currentChapterId = id
+            text = SessionStorage.getChapterText(id)
+            chapterAudioPath = null
+            voiceMapping.clear()
+            currentBookName = book.title
+            SessionStorage.currentBookName = book.title
+            statusMessage = "Импортировано: \"${book.title}\" (${book.chapters.size} глав)"
+        } catch (e: Exception) {
+            statusMessage = "Ошибка импорта $label: ${e.message}"
+            e.printStackTrace()
+        } finally {
+            isLoading = false
+            progressMessage = ""
+        }
     }
 
     // ── Voice mapping ─────────────────────────────────────────────────────────

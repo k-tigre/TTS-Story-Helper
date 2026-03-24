@@ -34,6 +34,7 @@ kotlin {
             implementation(libs.ktor.serialization.kotlinx.json)
             implementation(libs.kotlinx.serialization.json)
             implementation(libs.mp3spi)
+            implementation(libs.jsoup)
         }
     }
 }

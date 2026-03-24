@@ -198,6 +198,12 @@ fun MainScreen(onTokenRefresh: () -> Unit) {
                     TextButton(onClick = { vm.showLoadBookDialog = true }) {
                         Text("Загрузить книгу")
                     }
+                    TextButton(onClick = { vm.importFb2() }, enabled = !vm.isLoading) {
+                        Text("Импорт FB2")
+                    }
+                    TextButton(onClick = { vm.importEpub() }, enabled = !vm.isLoading) {
+                        Text("Импорт EPUB")
+                    }
                     TextButton(
                         onClick = { vm.showClearAllDialog = true },
                         colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error),
