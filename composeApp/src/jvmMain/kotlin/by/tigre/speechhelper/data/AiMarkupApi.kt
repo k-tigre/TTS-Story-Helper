@@ -117,7 +117,7 @@ object AiMarkupApi {
                     ChatMessage(role = "user", content = chunk),
                 ),
             )
-            results.add(result.replace("```", ""))
+            results.add(fixMalformedTags(result.replace("```", "")))
         }
         println("[AiFixDialog] Все чанки обработаны")
         emit(MarkupResult.Done(results.joinToString("\n")))
@@ -206,7 +206,25 @@ object AiMarkupApi {
 //        println("[AiMarkup] Проход 2 завершён (${finalResult.length} символов)")
 //        return finalResult.replace("```", "")
 
-        return firstResult.replace("```", "")
+        return fixMalformedTags(firstResult.replace("```", ""))
+    }
+
+    /**
+     * AI иногда возвращает теги в формате <voice_name> вместо [voice_name].
+     * Заменяем угловые скобки на квадратные для тегов голосов.
+     */
+    private fun fixMalformedTags(text: String): String {
+        return text
+            .replace(Regex("""</([\wа-яА-ЯёЁ_]+)>""")) { "[/${it.groupValues[1]}]" }
+            .replace(Regex("""<([\wа-яА-ЯёЁ_]+)>""")) { match ->
+                val name = match.groupValues[1]
+                // Не трогаем паузы вида <[small]> и HTML-подобные теги
+                if (name in setOf("tiny", "small", "medium", "large", "huge")) {
+                    match.value
+                } else {
+                    "[$name]"
+                }
+            }
     }
 
     private suspend fun sendChat(
