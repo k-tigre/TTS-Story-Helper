@@ -43,6 +43,7 @@ class MainViewModel(private val scope: CoroutineScope) {
 
     // Chapter text
     var text by mutableStateOf(SessionStorage.getChapterText(currentChapterId))
+    var originalText by mutableStateOf(SessionStorage.getOriginalText(currentChapterId))
 
     // Simple synthesis settings
     var selectedVoice by mutableStateOf(API_VOICES[0])
@@ -84,6 +85,7 @@ class MainViewModel(private val scope: CoroutineScope) {
     var showSaveBookDialog by mutableStateOf(false)
     var showLoadBookDialog by mutableStateOf(false)
     var showFolderIdDialog by mutableStateOf(false)
+    var showResetMarkupDialog by mutableStateOf(false)
 
     val hasMarkers: Boolean get() = TextParser.hasVoiceMarkers(text)
     val detectedVoices: Set<String> get() = if (hasMarkers) TextParser.extractVoiceNames(text) else emptySet()
@@ -106,6 +108,7 @@ class MainViewModel(private val scope: CoroutineScope) {
         currentChapterId = id
         SessionStorage.currentChapterId = id
         text = SessionStorage.getChapterText(id)
+        originalText = SessionStorage.getOriginalText(id)
         chapterAudioPath = SessionStorage.getChapterAudioPath(id)
         statusMessage = ""
     }
@@ -130,6 +133,7 @@ class MainViewModel(private val scope: CoroutineScope) {
         val newId = SessionStorage.ensureCurrentChapter()
         currentChapterId = newId
         text = SessionStorage.getChapterText(newId)
+        originalText = SessionStorage.getOriginalText(newId)
         chapterAudioPath = SessionStorage.getChapterAudioPath(newId)
         showDeleteDialog = false
     }
@@ -141,6 +145,7 @@ class MainViewModel(private val scope: CoroutineScope) {
         chapters = SessionStorage.listChapters()
         currentChapterId = id
         text = SessionStorage.getChapterText(id)
+        originalText = SessionStorage.getOriginalText(id)
         chapterAudioPath = null
         voiceMapping.clear()
         currentBookName = ""
@@ -178,6 +183,7 @@ class MainViewModel(private val scope: CoroutineScope) {
             val id = SessionStorage.ensureCurrentChapter()
             currentChapterId = id
             text = SessionStorage.getChapterText(id)
+            originalText = SessionStorage.getOriginalText(id)
             chapterAudioPath = SessionStorage.getChapterAudioPath(id)
             voiceMapping.clear()
             voiceMapping.putAll(SessionStorage.voiceMapping)
@@ -306,9 +312,22 @@ class MainViewModel(private val scope: CoroutineScope) {
         text = TextParser.buildText(segments.toList())
     }
 
+    fun resetMarkup() {
+        text = if (originalText.isNotBlank()) originalText
+               else TextParser.parse(text).joinToString("\n\n") { it.text }
+        saveCurrentChapter()
+        viewMode = 0
+        showResetMarkupDialog = false
+    }
+
     fun syncSegmentsFromText() {
         segments.clear()
         segments.addAll(TextParser.parse(text))
+        // Auto-save original text if markup exists but original wasn't saved yet
+        if (originalText.isBlank() && hasMarkers) {
+            originalText = segments.joinToString("\n\n") { it.text }
+            SessionStorage.setOriginalText(currentChapterId, originalText)
+        }
     }
 
     // ── Synthesis ─────────────────────────────────────────────────────────────
@@ -458,6 +477,8 @@ class MainViewModel(private val scope: CoroutineScope) {
                     when (result) {
                         is MarkupResult.InProgress -> progressMessage = result.message
                         is MarkupResult.Done -> {
+                            originalText = text
+                            SessionStorage.setOriginalText(currentChapterId, text)
                             text = result.text
                             saveCurrentChapter()
                             statusMessage = "Авто-разметка завершена"

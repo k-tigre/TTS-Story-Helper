@@ -110,6 +110,15 @@ object SessionStorage {
         File(chapterDir(id), "text.txt").writeText(text)
     }
 
+    fun getOriginalText(id: String): String {
+        val f = File(chapterDir(id), "original_text.txt")
+        return if (f.exists()) f.readText() else ""
+    }
+
+    fun setOriginalText(id: String, text: String) {
+        File(chapterDir(id), "original_text.txt").writeText(text)
+    }
+
     var voiceMapping: Map<String, VoiceSettings>
         get() {
             if (!mappingFile.exists()) return emptyMap()
@@ -199,6 +208,11 @@ object SessionStorage {
             sb.appendLine(chapter.name)
             sb.appendLine("##TEXT##")
             sb.appendLine(getChapterText(chapter.id))
+            val origText = getOriginalText(chapter.id)
+            if (origText.isNotBlank()) {
+                sb.appendLine("##ORIGINAL_TEXT##")
+                sb.appendLine(origText)
+            }
         }
         sb.appendLine("##END##")
 
@@ -215,7 +229,8 @@ object SessionStorage {
 
         // Parse voice mapping
         val newMapping = mutableMapOf<String, VoiceSettings>()
-        val newChapters = mutableListOf<Pair<String, String>>() // name to text
+        data class ChapterData(val name: String, val text: String, val originalText: String)
+        val newChapters = mutableListOf<ChapterData>()
         var i = 1
         // Parse voice mapping section
         if (i < lines.size && lines[i] == "##VOICE_MAPPING##") {
@@ -240,15 +255,27 @@ object SessionStorage {
             i++
             val chapterName = if (i < lines.size) lines[i] else "Без названия"
             i++
+            var chapterText = ""
+            var chapterOriginalText = ""
             if (i < lines.size && lines[i] == "##TEXT##") {
                 i++
                 val textLines = mutableListOf<String>()
-                while (i < lines.size && lines[i] != "##CHAPTER##" && lines[i] != "##END##") {
+                while (i < lines.size && lines[i] != "##CHAPTER##" && lines[i] != "##END##" && lines[i] != "##ORIGINAL_TEXT##") {
                     textLines.add(lines[i])
                     i++
                 }
-                newChapters.add(chapterName to textLines.joinToString("\n"))
+                chapterText = textLines.joinToString("\n")
             }
+            if (i < lines.size && lines[i] == "##ORIGINAL_TEXT##") {
+                i++
+                val origLines = mutableListOf<String>()
+                while (i < lines.size && lines[i] != "##CHAPTER##" && lines[i] != "##END##") {
+                    origLines.add(lines[i])
+                    i++
+                }
+                chapterOriginalText = origLines.joinToString("\n")
+            }
+            newChapters.add(ChapterData(chapterName, chapterText, chapterOriginalText))
         }
 
         if (newChapters.isEmpty()) return false
@@ -258,9 +285,12 @@ object SessionStorage {
 
         // Create new chapters
         var firstId: String? = null
-        for ((name, text) in newChapters) {
-            val id = createChapter(name)
-            setChapterText(id, text)
+        for (chapter in newChapters) {
+            val id = createChapter(chapter.name)
+            setChapterText(id, chapter.text)
+            if (chapter.originalText.isNotBlank()) {
+                setOriginalText(id, chapter.originalText)
+            }
             if (firstId == null) firstId = id
         }
 
