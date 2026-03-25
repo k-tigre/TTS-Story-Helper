@@ -3,6 +3,7 @@ package by.tigre.speechhelper.ui
 import androidx.compose.foundation.border
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -64,6 +65,7 @@ import by.tigre.speechhelper.domain.API_VOICES_INFO
 import by.tigre.speechhelper.domain.FORMATS
 import by.tigre.speechhelper.domain.TextParser
 import by.tigre.speechhelper.domain.TextSegment
+import by.tigre.speechhelper.domain.ValidationResult
 import by.tigre.speechhelper.domain.VoiceSettings
 import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.delay
@@ -318,6 +320,8 @@ fun MainScreen(onTokenRefresh: () -> Unit) {
                             onMarkupTextChange = { newText ->
                                 vm.text = newText
                             },
+                            validationResult = vm.validationResult,
+                            onRevalidate = { vm.revalidate() },
                             modifier = Modifier.weight(1f).fillMaxHeight(),
                         )
                     } else {
@@ -577,6 +581,8 @@ private fun MarkupSplitView(
     originalText: String,
     markupText: String,
     onMarkupTextChange: (String) -> Unit,
+    validationResult: ValidationResult?,
+    onRevalidate: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val outlineColor = MaterialTheme.colorScheme.outline
@@ -588,12 +594,35 @@ private fun MarkupSplitView(
         modifier = modifier
             .border(1.dp, outlineColor, androidx.compose.foundation.shape.RoundedCornerShape(4.dp)),
     ) {
-        // Column headers
+        // Column headers with validation indicator
         Row(
             modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
         ) {
             Text("Исходный текст", modifier = Modifier.weight(1f), style = labelStyle)
-            VerticalDivider(modifier = Modifier.height(20.dp))
+            // Validation indicator
+            if (validationResult != null) {
+                val validCount = validationResult.paragraphs.count { it.isValid }
+                val totalCount = validationResult.paragraphs.size
+                val indicatorColor = if (validationResult.isFullyValid) {
+                    Color(0xFF4CAF50)
+                } else {
+                    Color(0xFFFF9800)
+                }
+                Text(
+                    text = "$validCount/$totalCount",
+                    style = labelStyle.copy(color = indicatorColor),
+                    modifier = Modifier.padding(horizontal = 8.dp),
+                )
+            }
+            OutlinedButton(
+                onClick = onRevalidate,
+                modifier = Modifier.height(28.dp),
+                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+            ) {
+                Text("Проверить", style = labelStyle)
+            }
+            VerticalDivider(modifier = Modifier.height(20.dp).padding(horizontal = 4.dp))
             Text(
                 "Текст с разметкой",
                 modifier = Modifier.weight(1f).padding(start = 8.dp),
@@ -606,7 +635,7 @@ private fun MarkupSplitView(
         Row(
             modifier = Modifier.fillMaxWidth().weight(1f),
         ) {
-            // Left: original text (read-only, selectable)
+            // Left: original text (read-only, selectable) with validation highlights
             SelectionContainer(
                 modifier = Modifier
                     .weight(1f)
@@ -615,10 +644,17 @@ private fun MarkupSplitView(
             ) {
                 val scrollState = rememberScrollState()
                 Box(modifier = Modifier.fillMaxSize().verticalScroll(scrollState)) {
-                    Text(
-                        text = originalText,
-                        style = bodyStyle.copy(color = onSurfaceColor),
-                    )
+                    if (validationResult != null) {
+                        Text(
+                            text = buildValidatedOriginalAnnotatedString(validationResult, bodyStyle),
+                            style = bodyStyle.copy(color = onSurfaceColor),
+                        )
+                    } else {
+                        Text(
+                            text = originalText,
+                            style = bodyStyle.copy(color = onSurfaceColor),
+                        )
+                    }
                 }
             }
 
@@ -640,6 +676,63 @@ private fun MarkupSplitView(
                         modifier = Modifier.fillMaxWidth(),
                     )
                 }
+            }
+        }
+    }
+}
+
+// ── Paragraph validation annotation ──────────────────────────────────────────
+
+private fun buildValidatedOriginalAnnotatedString(
+    result: ValidationResult,
+    bodyStyle: androidx.compose.ui.text.TextStyle,
+): androidx.compose.ui.text.AnnotatedString {
+    return buildAnnotatedString {
+        result.paragraphs.forEachIndexed { idx, mapping ->
+            if (idx > 0) append("\n\n")
+            if (mapping.isValid) {
+                // Valid paragraph — no highlight, show stripped text
+                append(TextParser.stripMarkup(mapping.originalParagraph))
+            } else {
+                // Invalid paragraph — highlight missing words in red
+                // Strip markup from original too (it may contain partial markup)
+                val strippedOrig = TextParser.stripMarkup(mapping.originalParagraph)
+                val origWords = strippedOrig.split(Regex("\\s+")).filter { it.isNotBlank() }
+                val cleanMarkupWords = TextParser.extractWords(
+                    mapping.markupChunks.joinToString(" ") { TextParser.stripMarkup(it) }
+                )
+                val matchedIndices = TextParser.lcsIndicesA(
+                    origWords.map { it.lowercase() },
+                    cleanMarkupWords,
+                )
+                origWords.forEachIndexed { i, word ->
+                    if (i > 0) append(" ")
+                    if (i !in matchedIndices) {
+                        withStyle(SpanStyle(background = Color(0xFFEF5350).copy(alpha = 0.3f))) {
+                            append(word)
+                        }
+                    } else {
+                        append(word)
+                    }
+                }
+                // Show extra words added in markup
+                if (mapping.extraInMarkup.isNotEmpty()) {
+                    append(" ")
+                    withStyle(SpanStyle(
+                        background = Color(0xFFFFB300).copy(alpha = 0.3f),
+                        fontSize = bodyStyle.fontSize * 0.85,
+                    )) {
+                        append("[+${mapping.extraInMarkup.joinToString(" ")}]")
+                    }
+                }
+            }
+        }
+        // Show unmatched markup tail if any
+        val tail = result.unmatchedMarkupTail
+        if (tail != null) {
+            append("\n\n")
+            withStyle(SpanStyle(background = Color(0xFFFFB300).copy(alpha = 0.3f))) {
+                append("[Лишнее в разметке: ${TextParser.stripMarkup(tail).take(100)}...]")
             }
         }
     }

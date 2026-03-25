@@ -19,6 +19,7 @@ import by.tigre.speechhelper.domain.API_VOICES
 import by.tigre.speechhelper.domain.FORMATS
 import by.tigre.speechhelper.domain.TextParser
 import by.tigre.speechhelper.domain.TextSegment
+import by.tigre.speechhelper.domain.ValidationResult
 import by.tigre.speechhelper.domain.VoiceSettings
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -90,6 +91,18 @@ class MainViewModel(private val scope: CoroutineScope) {
     val hasMarkers: Boolean get() = TextParser.hasVoiceMarkers(text)
     val detectedVoices: Set<String> get() = if (hasMarkers) TextParser.extractVoiceNames(text) else emptySet()
 
+    // Paragraph validation
+    var validationResult by mutableStateOf<ValidationResult?>(null)
+        private set
+
+    fun revalidate() {
+        validationResult = if (originalText.isNotBlank() && hasMarkers) {
+            TextParser.buildParagraphMapping(originalText, text)
+        } else {
+            null
+        }
+    }
+
     init {
         voiceMapping.putAll(SessionStorage.voiceMapping)
     }
@@ -111,6 +124,7 @@ class MainViewModel(private val scope: CoroutineScope) {
         originalText = SessionStorage.getOriginalText(id)
         chapterAudioPath = SessionStorage.getChapterAudioPath(id)
         statusMessage = ""
+        revalidate()
     }
 
     fun createChapter(name: String) {
@@ -317,6 +331,7 @@ class MainViewModel(private val scope: CoroutineScope) {
                else TextParser.parse(text).joinToString("\n\n") { it.text }
         saveCurrentChapter()
         viewMode = 0
+        validationResult = null
         showResetMarkupDialog = false
     }
 
@@ -328,6 +343,7 @@ class MainViewModel(private val scope: CoroutineScope) {
             originalText = segments.joinToString("\n\n") { it.text }
             SessionStorage.setOriginalText(currentChapterId, originalText)
         }
+        revalidate()
     }
 
     // ── Synthesis ─────────────────────────────────────────────────────────────
@@ -481,6 +497,7 @@ class MainViewModel(private val scope: CoroutineScope) {
                             SessionStorage.setOriginalText(currentChapterId, text)
                             text = result.text
                             saveCurrentChapter()
+                            revalidate()
                             statusMessage = "Авто-разметка завершена"
                         }
                     }
