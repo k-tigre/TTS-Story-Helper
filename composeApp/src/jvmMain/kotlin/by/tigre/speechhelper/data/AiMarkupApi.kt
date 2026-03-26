@@ -103,12 +103,12 @@ object AiMarkupApi {
     ): Flow<MarkupResult> = flow {
         val model = "gpt://$folderId/deepseek-v32/latest"
         val chunks = splitTextForAi(text)
-        println("[AiFixDialog] Текст разбит на ${chunks.size} чанк(ов)")
+        println("[AiFixDialog] Text split into ${chunks.size} chunk(s)")
 
         val results = mutableListOf<String>()
         for ((i, chunk) in chunks.withIndex()) {
             emit(MarkupResult.InProgress("Исправление диалогов ${i + 1} из ${chunks.size}"))
-            println("[AiFixDialog] Обработка чанка ${i + 1}/${chunks.size} (${chunk.length} символов)")
+            println("[AiFixDialog] Processing chunk ${i + 1}/${chunks.size} (${chunk.length} chars)")
             val result = sendChat(
                 model = model,
                 token = token,
@@ -119,7 +119,7 @@ object AiMarkupApi {
             )
             results.add(fixMalformedTags(result.replace("```", "")))
         }
-        println("[AiFixDialog] Все чанки обработаны")
+        println("[AiFixDialog] All chunks processed")
         emit(MarkupResult.Done(results.joinToString("\n")))
     }
 
@@ -131,7 +131,7 @@ object AiMarkupApi {
     ): Flow<MarkupResult> = flow {
         val systemPrompt = buildSystemPrompt(existingVoices)
         val chunks = splitTextForAi(text)
-        println("[AiMarkup] Текст разбит на ${chunks.size} чанк(ов), existingVoices=$existingVoices")
+        println("[AiMarkup] Text split into ${chunks.size} chunk(s), existingVoices=$existingVoices")
 
         if (chunks.size == 1) {
             emit(MarkupResult.InProgress("Авто-разметка..."))
@@ -143,11 +143,11 @@ object AiMarkupApi {
         val results = mutableListOf<String>()
         for ((i, chunk) in chunks.withIndex()) {
             emit(MarkupResult.InProgress("Авто-разметка ${i + 1} из ${chunks.size}"))
-            println("[AiMarkup] Обработка чанка ${i + 1}/${chunks.size} (${chunk.length} символов)")
+            println("[AiMarkup] Processing chunk ${i + 1}/${chunks.size} (${chunk.length} chars)")
             val result = requestMarkup(chunk, token, folderId, systemPrompt)
             results.add(result)
         }
-        println("[AiMarkup] Все чанки обработаны")
+        println("[AiMarkup] All chunks processed")
         emit(MarkupResult.Done(results.joinToString("\n")))
     }
 
@@ -179,7 +179,7 @@ object AiMarkupApi {
         val model = "gpt://$folderId/deepseek-v32/latest"
 
         // Первый проход — основная разметка
-        println("[AiMarkup] Проход 1: основная разметка (${text.length} символов)...")
+        println("[AiMarkup] Pass 1: main markup (${text.length} chars)...")
         val firstResult = sendChat(
             model = model,
             token = token,
@@ -188,7 +188,7 @@ object AiMarkupApi {
                 ChatMessage(role = "user", content = text),
             ),
         )
-        println("[AiMarkup] Проход 1 завершён (${firstResult.length} символов)")
+        println("[AiMarkup] Pass 1 done (${firstResult.length} chars)")
 
         // TODO: Второй проход временно отключён
 //        // Второй проход — исправление диалогов
@@ -258,7 +258,7 @@ object AiMarkupApi {
         val chatResponse = json.decodeFromString<ChatResponse>(responseText)
         val content = chatResponse.choices.firstOrNull()?.message?.content
             ?: throw AiMarkupException("No content in AI response")
-        println("[AiMarkup] <- Получено ${content.length} символов")
+        println("[AiMarkup] <- Received ${content.length} chars")
         return content
     }
 

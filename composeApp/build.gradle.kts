@@ -44,8 +44,6 @@ compose.desktop {
     application {
         mainClass = "by.tigre.speechhelper.MainKt"
 
-        jvmArgs += listOf("-Dstdout.encoding=UTF-8", "-Dstderr.encoding=UTF-8")
-
         nativeDistributions {
             targetFormats(TargetFormat.Dmg, TargetFormat.Msi, TargetFormat.Deb)
             packageName = "by.tigre.speechhelper"
