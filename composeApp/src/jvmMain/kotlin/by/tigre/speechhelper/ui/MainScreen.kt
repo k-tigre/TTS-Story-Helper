@@ -637,28 +637,32 @@ private fun MarkupSplitView(
         val leftScrollState = rememberScrollState()
         val rightScrollState = rememberScrollState()
         // Synchronized scrolling: proportional mapping
-        var isSyncingScroll by remember { mutableStateOf(false) }
+        // Track last programmatically-set scroll value to distinguish user vs sync scrolls
+        val lastSyncedLeft = remember { androidx.compose.runtime.mutableIntStateOf(-1) }
+        val lastSyncedRight = remember { androidx.compose.runtime.mutableIntStateOf(-1) }
         LaunchedEffect(Unit) {
-            snapshotFlow { leftScrollState.value to leftScrollState.maxValue }
-                .collect { (value, maxValue) ->
-                    if (!isSyncingScroll && maxValue > 0 && rightScrollState.maxValue > 0) {
-                        val fraction = value.toFloat() / maxValue
+            snapshotFlow { leftScrollState.value }
+                .collect { value ->
+                    if (value == lastSyncedLeft.intValue) {
+                        lastSyncedLeft.intValue = -1 // consume: this was a sync scroll
+                    } else if (leftScrollState.maxValue > 0 && rightScrollState.maxValue > 0) {
+                        val fraction = value.toFloat() / leftScrollState.maxValue
                         val target = (fraction * rightScrollState.maxValue).toInt()
-                        isSyncingScroll = true
+                        lastSyncedRight.intValue = target
                         rightScrollState.scrollTo(target)
-                        isSyncingScroll = false
                     }
                 }
         }
         LaunchedEffect(Unit) {
-            snapshotFlow { rightScrollState.value to rightScrollState.maxValue }
-                .collect { (value, maxValue) ->
-                    if (!isSyncingScroll && maxValue > 0 && leftScrollState.maxValue > 0) {
-                        val fraction = value.toFloat() / maxValue
+            snapshotFlow { rightScrollState.value }
+                .collect { value ->
+                    if (value == lastSyncedRight.intValue) {
+                        lastSyncedRight.intValue = -1 // consume: this was a sync scroll
+                    } else if (rightScrollState.maxValue > 0 && leftScrollState.maxValue > 0) {
+                        val fraction = value.toFloat() / rightScrollState.maxValue
                         val target = (fraction * leftScrollState.maxValue).toInt()
-                        isSyncingScroll = true
+                        lastSyncedLeft.intValue = target
                         leftScrollState.scrollTo(target)
-                        isSyncingScroll = false
                     }
                 }
         }
