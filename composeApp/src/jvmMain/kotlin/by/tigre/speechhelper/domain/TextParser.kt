@@ -7,7 +7,7 @@ data class TextSegment(
 
 data class ParagraphMapping(
     val originalParagraph: String,
-    val markupChunks: List<String>,
+    val matchedSegmentIndices: List<Int>,
     val isValid: Boolean,
     val extraInMarkup: List<String>,
     val missingInMarkup: List<String>,
@@ -16,7 +16,7 @@ data class ParagraphMapping(
 data class ValidationResult(
     val paragraphs: List<ParagraphMapping>,
     val isFullyValid: Boolean,
-    val unmatchedMarkupTail: String?,
+    val unmatchedSegmentIndices: Set<Int>,
 )
 
 object TextParser {
@@ -65,61 +65,12 @@ object TextParser {
     }
 
     /**
-     * Match original paragraphs to segments using word-based alignment.
-     * Resilient to extra newlines, whitespace changes, and markup in segments.
+     * Extract words from text for comparison: strip markup, split by whitespace, lowercase.
+     * Strict comparison — words are compared as-is (with punctuation), only lowercased.
      */
-    fun matchParagraphsToSegments(
-        originalParagraphs: List<String>,
-        segments: List<TextSegment>,
-    ): List<String> {
-        if (originalParagraphs.isEmpty() || segments.isEmpty()) {
-            return segments.map { "" }
-        }
-
-        // Build word lists for each original paragraph and each segment
-        val origParaWords = originalParagraphs.map { extractWords(it) }
-        val segmentWords = segments.map { extractWords(it.text) }
-
-        // Greedy two-pointer alignment:
-        // Walk through original paragraphs and segment words simultaneously.
-        // For each segment, consume original paragraphs until we've matched enough words.
-        var origParaIdx = 0
-        var origWordIdx = 0 // word index within current original paragraph
-
-        return segmentWords.mapIndexed { segIdx, segWords ->
-            val startOrigPara = origParaIdx
-            var segWordIdx = 0
-
-            // Try to match words from this segment against original paragraphs
-            while (segWordIdx < segWords.size && origParaIdx < origParaWords.size) {
-                val origWords = origParaWords[origParaIdx]
-                if (origWordIdx >= origWords.size) {
-                    // Move to next original paragraph
-                    origParaIdx++
-                    origWordIdx = 0
-                    continue
-                }
-
-                if (segWords[segWordIdx] == origWords[origWordIdx]) {
-                    segWordIdx++
-                    origWordIdx++
-                } else {
-                    // Words don't match — could be an edit in segment or original
-                    // Try advancing segment word (added in markup)
-                    segWordIdx++
-                }
-            }
-
-            // If we partially consumed an original paragraph, include it
-            val endOrigPara = if (origWordIdx > 0) origParaIdx + 1 else origParaIdx
-
-            // For the last segment, include all remaining original paragraphs
-            val actualEnd = if (segIdx == segments.size - 1) originalParagraphs.size else endOrigPara
-
-            (startOrigPara until actualEnd)
-                .mapNotNull { originalParagraphs.getOrNull(it) }
-                .joinToString("\n\n")
-        }
+    fun extractCompareWords(text: String): List<String> {
+        val stripped = stripMarkup(text)
+        return stripped.split(Regex("\\s+")).filter { it.isNotBlank() }.map { it.lowercase() }
     }
 
     // ── Markup stripping ────────────────────────────────────────────────────
@@ -186,54 +137,42 @@ object TextParser {
     // ── Paragraph validation ─────────────────────────────────────────────────
 
     /**
-     * Checks how well a sequence of original words can be found at the start of markup words.
-     * Returns the number of original words matched and how many markup words were consumed.
-     * A match is considered successful if at least [threshold] fraction of original words were found.
+     * Compare original text (as source of truth) against parsed segments.
+     *
+     * Algorithm:
+     * 1. Split original text into paragraphs
+     * 2. For each paragraph, search for the best matching window of consecutive segments
+     *    (starting from where the previous paragraph ended)
+     * 3. Match is based on LCS coverage >= 50% of paragraph words
+     * 4. Unmatched segments are collected separately
      */
-    private fun tryMatchWords(
-        origWords: List<String>,
-        markupWords: List<String>,
-        markupOffset: Int,
-    ): Pair<Int, Int>? {
-        if (origWords.isEmpty()) return null
-        var origIdx = 0
-        var markupIdx = markupOffset
-        while (origIdx < origWords.size && markupIdx < markupWords.size) {
-            if (origWords[origIdx].equals(markupWords[markupIdx], ignoreCase = true)) {
-                origIdx++
-            }
-            markupIdx++
-        }
-        // Require at least 50% of original words matched to consider it a real match
-        return if (origIdx >= origWords.size / 2) Pair(origIdx, markupIdx) else null
-    }
-
-    fun buildParagraphMapping(originalText: String, markupText: String): ValidationResult {
+    fun buildParagraphMapping(originalText: String, segments: List<TextSegment>): ValidationResult {
         val origParagraphs = originalText.split(Regex("\n\\s*\n")).map { it.trim() }.filter { it.isNotBlank() }
-        val markupChunks = markupText.split(Regex("\n\\s*\n")).map { it.trim() }.filter { it.isNotBlank() }
 
         if (origParagraphs.isEmpty()) {
-            return ValidationResult(emptyList(), true, markupText.takeIf { it.isNotBlank() })
+            return ValidationResult(
+                paragraphs = emptyList(),
+                isFullyValid = segments.isEmpty(),
+                unmatchedSegmentIndices = segments.indices.toSet(),
+            )
         }
 
-        val origParaWords = origParagraphs.map { extractWords(stripMarkup(it)) }
-
-        // Build a flat word list from all markup chunks, tracking chunk boundaries
-        // chunkBoundaries[i] = index of first word in markupChunks[i] within the flat list
-        val flatMarkupWords = mutableListOf<String>()
-        val wordToChunkIdx = mutableListOf<Int>() // for each flat word, which chunk it belongs to
-        for ((chunkI, chunk) in markupChunks.withIndex()) {
-            val words = extractWords(stripMarkup(chunk))
+        // Build flat word list from all segments, tracking which segment each word belongs to
+        val flatWords = mutableListOf<String>()
+        val wordToSegIdx = mutableListOf<Int>()
+        for ((segIdx, seg) in segments.withIndex()) {
+            val words = extractCompareWords(seg.text)
             for (w in words) {
-                flatMarkupWords.add(w)
-                wordToChunkIdx.add(chunkI)
+                flatWords.add(w)
+                wordToSegIdx.add(segIdx)
             }
         }
 
-        // For each original paragraph, try to find its words starting from current position.
-        // If match fails — paragraph is missing, don't consume markup words.
-        var markupWordPos = 0
-        val usedChunkIndices = mutableSetOf<Int>()
+        val origParaWords = origParagraphs.map { extractCompareWords(it) }
+
+        // Track usage
+        val usedSegmentIndices = mutableSetOf<Int>()
+        var flatWordPos = 0
 
         val mappings = origParagraphs.mapIndexed { paraIdx, origPara ->
             val origWords = origParaWords[paraIdx]
@@ -241,48 +180,46 @@ object TextParser {
             if (origWords.isEmpty()) {
                 return@mapIndexed ParagraphMapping(
                     originalParagraph = origPara,
-                    markupChunks = emptyList(),
+                    matchedSegmentIndices = emptyList(),
                     isValid = true,
                     extraInMarkup = emptyList(),
                     missingInMarkup = emptyList(),
                 )
             }
 
-            val matchResult = tryMatchWords(origWords, flatMarkupWords, markupWordPos)
+            // Try to match this paragraph's words starting from current flatWordPos
+            val matchResult = tryMatchSequence(origWords, flatWords, flatWordPos)
 
             if (matchResult == null) {
-                // Could not match this paragraph — it's missing in markup
                 ParagraphMapping(
                     originalParagraph = origPara,
-                    markupChunks = emptyList(),
+                    matchedSegmentIndices = emptyList(),
                     isValid = false,
                     extraInMarkup = emptyList(),
                     missingInMarkup = origWords,
                 )
             } else {
                 val (_, consumedUpTo) = matchResult
-                // Collect which markup chunks were involved
-                val involvedChunks = (markupWordPos until consumedUpTo)
-                    .map { wordToChunkIdx[it] }
+                // Which segments were involved
+                val involvedSegments = (flatWordPos until consumedUpTo)
+                    .map { wordToSegIdx[it] }
                     .distinct()
                     .sorted()
+                usedSegmentIndices.addAll(involvedSegments)
 
-                val matchedChunks = involvedChunks.map { markupChunks[it] }
-                usedChunkIndices.addAll(involvedChunks)
-
-                // LCS comparison for detailed diff
-                val markupWordsSlice = flatMarkupWords.subList(markupWordPos, consumedUpTo)
+                // Detailed word diff via LCS
+                val markupWordsSlice = flatWords.subList(flatWordPos, consumedUpTo)
                 val matchedOrigIndices = lcsIndicesA(origWords, markupWordsSlice)
                 val matchedMarkupIndices = lcsIndicesB(origWords, markupWordsSlice)
 
                 val missing = origWords.filterIndexed { i, _ -> i !in matchedOrigIndices }
                 val extra = markupWordsSlice.filterIndexed { i, _ -> i !in matchedMarkupIndices }
 
-                markupWordPos = consumedUpTo
+                flatWordPos = consumedUpTo
 
                 ParagraphMapping(
                     originalParagraph = origPara,
-                    markupChunks = matchedChunks,
+                    matchedSegmentIndices = involvedSegments,
                     isValid = missing.isEmpty() && extra.isEmpty(),
                     extraInMarkup = extra,
                     missingInMarkup = missing,
@@ -290,17 +227,36 @@ object TextParser {
             }
         }
 
-        // Collect unmatched markup chunks (not used by any paragraph)
-        val unusedChunks = markupChunks.indices
-            .filter { it !in usedChunkIndices }
-            .map { markupChunks[it] }
-        val unmatchedTail = unusedChunks.joinToString("\n\n").takeIf { it.isNotBlank() }
+        val unmatchedSegments = segments.indices.filter { it !in usedSegmentIndices }.toSet()
 
         return ValidationResult(
             paragraphs = mappings,
-            isFullyValid = mappings.all { it.isValid } && unmatchedTail == null,
-            unmatchedMarkupTail = unmatchedTail,
+            isFullyValid = mappings.all { it.isValid } && unmatchedSegments.isEmpty(),
+            unmatchedSegmentIndices = unmatchedSegments,
         )
+    }
+
+    /**
+     * Try to match origWords in flatWords starting from offset.
+     * Walks through both lists; if an orig word matches the current flat word, both advance.
+     * Otherwise only flat word advances (allows extra words in markup).
+     * Returns (matched count, consumed up to) or null if < 50% matched.
+     */
+    private fun tryMatchSequence(
+        origWords: List<String>,
+        flatWords: List<String>,
+        offset: Int,
+    ): Pair<Int, Int>? {
+        if (origWords.isEmpty()) return null
+        var origIdx = 0
+        var flatIdx = offset
+        while (origIdx < origWords.size && flatIdx < flatWords.size) {
+            if (origWords[origIdx] == flatWords[flatIdx]) {
+                origIdx++
+            }
+            flatIdx++
+        }
+        return if (origIdx >= origWords.size / 2) Pair(origIdx, flatIdx) else null
     }
 
     fun buildText(segments: List<TextSegment>): String {

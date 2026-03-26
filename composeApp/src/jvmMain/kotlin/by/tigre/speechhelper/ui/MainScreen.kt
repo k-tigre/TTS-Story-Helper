@@ -321,6 +321,7 @@ fun MainScreen(onTokenRefresh: () -> Unit) {
                                 vm.text = newText
                             },
                             validationResult = vm.validationResult,
+                            segments = vm.segments.toList(),
                             onRevalidate = { vm.revalidate() },
                             modifier = Modifier.weight(1f).fillMaxHeight(),
                         )
@@ -582,6 +583,7 @@ private fun MarkupSplitView(
     markupText: String,
     onMarkupTextChange: (String) -> Unit,
     validationResult: ValidationResult?,
+    segments: List<TextSegment>,
     onRevalidate: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -632,6 +634,43 @@ private fun MarkupSplitView(
         HorizontalDivider()
 
         // Content: two scrollable columns side by side
+        val leftScrollState = rememberScrollState()
+        val rightScrollState = rememberScrollState()
+        // Synchronized scrolling: proportional mapping
+        var isSyncingScroll by remember { mutableStateOf(false) }
+        LaunchedEffect(Unit) {
+            snapshotFlow { leftScrollState.value to leftScrollState.maxValue }
+                .collect { (value, maxValue) ->
+                    if (!isSyncingScroll && maxValue > 0 && rightScrollState.maxValue > 0) {
+                        val fraction = value.toFloat() / maxValue
+                        val target = (fraction * rightScrollState.maxValue).toInt()
+                        isSyncingScroll = true
+                        rightScrollState.scrollTo(target)
+                        isSyncingScroll = false
+                    }
+                }
+        }
+        LaunchedEffect(Unit) {
+            snapshotFlow { rightScrollState.value to rightScrollState.maxValue }
+                .collect { (value, maxValue) ->
+                    if (!isSyncingScroll && maxValue > 0 && leftScrollState.maxValue > 0) {
+                        val fraction = value.toFloat() / maxValue
+                        val target = (fraction * leftScrollState.maxValue).toInt()
+                        isSyncingScroll = true
+                        leftScrollState.scrollTo(target)
+                        isSyncingScroll = false
+                    }
+                }
+        }
+
+        // TextFieldValue for cursor stability in markup panel
+        var markupFieldValue by remember { mutableStateOf(TextFieldValue(markupText)) }
+        LaunchedEffect(markupText) {
+            if (markupFieldValue.text != markupText) {
+                markupFieldValue = markupFieldValue.copy(text = markupText)
+            }
+        }
+
         Row(
             modifier = Modifier.fillMaxWidth().weight(1f),
         ) {
@@ -642,11 +681,10 @@ private fun MarkupSplitView(
                     .fillMaxHeight()
                     .padding(8.dp),
             ) {
-                val scrollState = rememberScrollState()
-                Box(modifier = Modifier.fillMaxSize().verticalScroll(scrollState)) {
+                Box(modifier = Modifier.fillMaxSize().verticalScroll(leftScrollState)) {
                     if (validationResult != null) {
                         Text(
-                            text = buildValidatedOriginalAnnotatedString(validationResult, bodyStyle),
+                            text = buildValidatedOriginalAnnotatedString(validationResult, segments, bodyStyle),
                             style = bodyStyle.copy(color = onSurfaceColor),
                         )
                     } else {
@@ -667,11 +705,13 @@ private fun MarkupSplitView(
                     .fillMaxHeight()
                     .padding(8.dp),
             ) {
-                val scrollState = rememberScrollState()
-                Box(modifier = Modifier.fillMaxSize().verticalScroll(scrollState)) {
+                Box(modifier = Modifier.fillMaxSize().verticalScroll(rightScrollState)) {
                     BasicTextField(
-                        value = markupText,
-                        onValueChange = onMarkupTextChange,
+                        value = markupFieldValue,
+                        onValueChange = { newValue ->
+                            markupFieldValue = newValue
+                            onMarkupTextChange(newValue.text)
+                        },
                         textStyle = bodyStyle.copy(color = onSurfaceColor),
                         modifier = Modifier.fillMaxWidth(),
                     )
@@ -685,25 +725,30 @@ private fun MarkupSplitView(
 
 private fun buildValidatedOriginalAnnotatedString(
     result: ValidationResult,
+    segments: List<TextSegment>,
     bodyStyle: androidx.compose.ui.text.TextStyle,
 ): androidx.compose.ui.text.AnnotatedString {
     return buildAnnotatedString {
         result.paragraphs.forEachIndexed { idx, mapping ->
             if (idx > 0) append("\n\n")
             if (mapping.isValid) {
-                // Valid paragraph — no highlight, show stripped text
                 append(TextParser.stripMarkup(mapping.originalParagraph))
+            } else if (mapping.matchedSegmentIndices.isEmpty()) {
+                // Entire paragraph is missing in markup — highlight all in red
+                withStyle(SpanStyle(background = Color(0xFFEF5350).copy(alpha = 0.3f))) {
+                    append(TextParser.stripMarkup(mapping.originalParagraph))
+                }
             } else {
-                // Invalid paragraph — highlight missing words in red
-                // Strip markup from original too (it may contain partial markup)
+                // Partial match — highlight missing words in red
                 val strippedOrig = TextParser.stripMarkup(mapping.originalParagraph)
                 val origWords = strippedOrig.split(Regex("\\s+")).filter { it.isNotBlank() }
-                val cleanMarkupWords = TextParser.extractWords(
-                    mapping.markupChunks.joinToString(" ") { TextParser.stripMarkup(it) }
-                )
+                val segmentText = mapping.matchedSegmentIndices
+                    .mapNotNull { segments.getOrNull(it) }
+                    .joinToString(" ") { it.text }
+                val markupWords = TextParser.extractCompareWords(segmentText)
                 val matchedIndices = TextParser.lcsIndicesA(
                     origWords.map { it.lowercase() },
-                    cleanMarkupWords,
+                    markupWords,
                 )
                 origWords.forEachIndexed { i, word ->
                     if (i > 0) append(" ")
@@ -715,7 +760,6 @@ private fun buildValidatedOriginalAnnotatedString(
                         append(word)
                     }
                 }
-                // Show extra words added in markup
                 if (mapping.extraInMarkup.isNotEmpty()) {
                     append(" ")
                     withStyle(SpanStyle(
@@ -727,12 +771,16 @@ private fun buildValidatedOriginalAnnotatedString(
                 }
             }
         }
-        // Show unmatched markup tail if any
-        val tail = result.unmatchedMarkupTail
-        if (tail != null) {
+        // Show unmatched segments
+        if (result.unmatchedSegmentIndices.isNotEmpty()) {
+            val unmatchedText = result.unmatchedSegmentIndices
+                .sorted()
+                .mapNotNull { segments.getOrNull(it) }
+                .joinToString(" ") { it.text }
+            val preview = TextParser.stripMarkup(unmatchedText).take(100)
             append("\n\n")
             withStyle(SpanStyle(background = Color(0xFFFFB300).copy(alpha = 0.3f))) {
-                append("[Лишнее в разметке: ${TextParser.stripMarkup(tail).take(100)}...]")
+                append("[Лишнее в разметке: $preview...]")
             }
         }
     }

@@ -97,7 +97,10 @@ class MainViewModel(private val scope: CoroutineScope) {
 
     fun revalidate() {
         validationResult = if (originalText.isNotBlank() && hasMarkers) {
-            TextParser.buildParagraphMapping(originalText, text)
+            val segs = TextParser.parse(text)
+            segments.clear()
+            segments.addAll(segs)
+            TextParser.buildParagraphMapping(originalText, segs)
         } else {
             null
         }
