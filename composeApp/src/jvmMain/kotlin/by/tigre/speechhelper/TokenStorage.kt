@@ -7,6 +7,7 @@ object TokenStorage {
 
     private const val KEY_IAM_TOKEN = "iam_token"
     private const val KEY_FOLDER_ID = "folder_id_id"
+    private const val KEY_FIRST_LAUNCH = "first_launch_done"
 
     var iamToken: String
         get() = prefs.get(KEY_IAM_TOKEN, "")
@@ -15,6 +16,13 @@ object TokenStorage {
     var folderId: String
         get() = prefs.get(KEY_FOLDER_ID, "")
         set(value) = prefs.put(KEY_FOLDER_ID, value)
+
+    val isFirstLaunch: Boolean
+        get() = !prefs.getBoolean(KEY_FIRST_LAUNCH, false)
+
+    fun markFirstLaunchDone() {
+        prefs.putBoolean(KEY_FIRST_LAUNCH, true)
+    }
 
     fun hasCredentials(): Boolean = iamToken.isNotBlank()
 

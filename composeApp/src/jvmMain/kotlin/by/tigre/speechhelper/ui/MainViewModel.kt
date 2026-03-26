@@ -76,6 +76,8 @@ class MainViewModel(private val scope: CoroutineScope) {
 
     // View mode: 0 = Text, 1 = Segments
     var viewMode by mutableStateOf(0)
+    var markupModeEnabled by mutableStateOf(false)
+    private var textHadOriginalMarkup = false
     val segments = mutableStateListOf<TextSegment>()
 
     // Dialog visibility
@@ -87,6 +89,7 @@ class MainViewModel(private val scope: CoroutineScope) {
     var showLoadBookDialog by mutableStateOf(false)
     var showFolderIdDialog by mutableStateOf(false)
     var showResetMarkupDialog by mutableStateOf(false)
+    var showHelpDialog by mutableStateOf(false)
 
     val hasMarkers: Boolean get() = TextParser.hasVoiceMarkers(text)
     val detectedVoices: Set<String> get() = if (hasMarkers) TextParser.extractVoiceNames(text) else emptySet()
@@ -108,6 +111,13 @@ class MainViewModel(private val scope: CoroutineScope) {
 
     init {
         voiceMapping.putAll(SessionStorage.voiceMapping)
+        ensureVoiceMain()
+    }
+
+    private fun ensureVoiceMain() {
+        if ("voice_main" !in voiceMapping) {
+            voiceMapping["voice_main"] = VoiceSettings()
+        }
     }
 
     // ── Chapter management ────────────────────────────────────────────────────
@@ -127,6 +137,8 @@ class MainViewModel(private val scope: CoroutineScope) {
         originalText = SessionStorage.getOriginalText(id)
         chapterAudioPath = SessionStorage.getChapterAudioPath(id)
         statusMessage = ""
+        markupModeEnabled = originalText.isNotBlank() && hasMarkers
+        ensureVoiceMain()
         revalidate()
     }
 
@@ -333,6 +345,7 @@ class MainViewModel(private val scope: CoroutineScope) {
         text = if (originalText.isNotBlank()) originalText
                else TextParser.parse(text).joinToString("\n\n") { it.text }
         saveCurrentChapter()
+        markupModeEnabled = false
         viewMode = 0
         validationResult = null
         showResetMarkupDialog = false
@@ -349,6 +362,78 @@ class MainViewModel(private val scope: CoroutineScope) {
         revalidate()
     }
 
+    fun wrapTextAsMarkup() {
+        if (text.isBlank() || hasMarkers) return
+        originalText = text
+        SessionStorage.setOriginalText(currentChapterId, originalText)
+        text = "[voice_main]\n$text\n[/voice_main]"
+        markupModeEnabled = true
+        textHadOriginalMarkup = false
+        revalidate()
+    }
+
+    fun enableMarkupMode() {
+        if (!hasMarkers) return
+        if (originalText.isBlank()) {
+            originalText = text
+            SessionStorage.setOriginalText(currentChapterId, originalText)
+        }
+        markupModeEnabled = true
+        textHadOriginalMarkup = true
+        revalidate()
+    }
+
+    fun unwrapMarkup() {
+        // If text originally had markup (enableMarkupMode was used), keep text as-is
+        // If markup was added by us (wrapTextAsMarkup), restore original
+        if (!textHadOriginalMarkup) {
+            text = if (originalText.isNotBlank()) originalText
+                   else TextParser.parse(text).joinToString("\n\n") { it.text }
+            originalText = ""
+            SessionStorage.setOriginalText(currentChapterId, "")
+            saveCurrentChapter()
+        }
+        markupModeEnabled = false
+        viewMode = 0
+        validationResult = null
+    }
+
+    fun updateOriginalText(newOriginal: String) {
+        val oldOriginal = originalText
+        originalText = newOriginal
+        SessionStorage.setOriginalText(currentChapterId, newOriginal)
+        // Sync changes to markup: replace text content inside voice tags
+        text = syncOriginalToMarkup(oldOriginal, newOriginal, text)
+        revalidate()
+    }
+
+    /**
+     * Propagate edits from original text to markup.
+     * Splits both old and new originals by paragraphs, then replaces
+     * the corresponding text inside voice tags in the markup.
+     */
+    private fun syncOriginalToMarkup(oldOriginal: String, newOriginal: String, markup: String): String {
+        val oldParagraphs = oldOriginal.split(Regex("\n\\s*\n")).map { it.trim() }.filter { it.isNotBlank() }
+        val newParagraphs = newOriginal.split(Regex("\n\\s*\n")).map { it.trim() }.filter { it.isNotBlank() }
+        var result = markup
+        // For each changed paragraph, find its old content in markup and replace
+        for (i in oldParagraphs.indices) {
+            if (i >= newParagraphs.size) break
+            if (oldParagraphs[i] != newParagraphs[i]) {
+                result = result.replace(oldParagraphs[i], newParagraphs[i])
+            }
+        }
+        // If new paragraphs were added at the end, append them before the last closing tag
+        if (newParagraphs.size > oldParagraphs.size) {
+            val extra = newParagraphs.drop(oldParagraphs.size).joinToString("\n\n")
+            val lastCloseTag = result.lastIndexOf("[/")
+            if (lastCloseTag >= 0) {
+                result = result.substring(0, lastCloseTag) + extra + "\n" + result.substring(lastCloseTag)
+            }
+        }
+        return result
+    }
+
     // ── Synthesis ─────────────────────────────────────────────────────────────
 
     fun clearCache() {
@@ -357,23 +442,24 @@ class MainViewModel(private val scope: CoroutineScope) {
     }
 
     fun launchSimpleSynthesis() {
+        val settings = voiceMapping["voice_main"] ?: VoiceSettings()
         scope.launch {
             isLoading = true
             statusMessage = ""
-            progressMessage = "Синтез речи\nголос: $selectedVoice"
+            progressMessage = "Синтез речи\nголос: ${settings.voice}"
             try {
                 SpeechKitApi.synthesize(
                     text = text,
-                    voice = selectedVoice,
-                    role = selectedRole.ifBlank { null },
-                    speed = speed,
-                    pitchShift = pitchShift,
+                    voice = settings.voice,
+                    role = settings.role.ifBlank { null },
+                    speed = settings.speed,
+                    pitchShift = settings.pitchShift,
                     format = selectedFormat,
                     token = TokenStorage.iamToken,
                 ).collectLatest { result ->
                     when (result) {
                         is SynthesisResult.InProgress ->
-                            progressMessage = "Синтез речи\nголос: $selectedVoice\n${result.message}"
+                            progressMessage = "Синтез речи\nголос: ${settings.voice}\n${result.message}"
                         is SynthesisResult.Done -> {
                             val chapterName = chapters.find { it.id == currentChapterId }?.name ?: ""
                             val filePath = saveAudioFile(result.bytes, selectedFormat, currentBookName, chapterName)
@@ -500,6 +586,7 @@ class MainViewModel(private val scope: CoroutineScope) {
                             SessionStorage.setOriginalText(currentChapterId, text)
                             text = result.text
                             saveCurrentChapter()
+                            markupModeEnabled = true
                             revalidate()
                             statusMessage = "Авто-разметка завершена"
                         }

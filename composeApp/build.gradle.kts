@@ -49,6 +49,12 @@ compose.desktop {
             packageName = "by.tigre.speechhelper"
             packageVersion = "1.0.0"
 
+            macOS {
+                signing {
+                    sign.set(false)
+                }
+            }
+
             val iconsRoot = project.file("src/jvmMain/resources")
             macOS { iconFile.set(iconsRoot.resolve("app_icon.png")) }
             windows { iconFile.set(iconsRoot.resolve("app_icon.png")) }

@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -30,7 +31,6 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.PrimaryTabRow
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Slider
 import androidx.compose.material3.Tab
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -60,9 +60,6 @@ import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.unit.dp
 import by.tigre.speechhelper.TokenStorage
 import by.tigre.speechhelper.data.SessionStorage
-import by.tigre.speechhelper.domain.API_VOICES
-import by.tigre.speechhelper.domain.API_VOICES_INFO
-import by.tigre.speechhelper.domain.FORMATS
 import by.tigre.speechhelper.domain.TextParser
 import by.tigre.speechhelper.domain.TextSegment
 import by.tigre.speechhelper.domain.ValidationResult
@@ -75,9 +72,18 @@ import java.io.File
 
 @OptIn(ExperimentalMaterial3Api::class, FlowPreview::class)
 @Composable
-fun MainScreen(onTokenRefresh: () -> Unit) {
+fun MainScreen() {
     val scope = rememberCoroutineScope()
     val vm = remember(scope) { MainViewModel(scope) }
+    var showTokenDialog by remember { mutableStateOf(false) }
+
+    // Show help on first launch
+    LaunchedEffect(Unit) {
+        if (TokenStorage.isFirstLaunch) {
+            vm.showHelpDialog = true
+            TokenStorage.markFirstLaunchDone()
+        }
+    }
 
     // Local TextFieldValue for cursor control (Home/End/PageUp/PageDown)
     var textFieldValue by remember { mutableStateOf(TextFieldValue(vm.text)) }
@@ -129,16 +135,8 @@ fun MainScreen(onTokenRefresh: () -> Unit) {
     }
 
     // Sync segments when switching to segment view or split view
-    LaunchedEffect(vm.viewMode, vm.currentChapterId, vm.hasMarkers) {
-        if (vm.viewMode == 1 || (vm.viewMode == 0 && vm.hasMarkers)) vm.syncSegmentsFromText()
-    }
-
-    // Reset role if not available for currently selected voice (simple mode)
-    val availableRoles = API_VOICES_INFO.find { it.id == vm.selectedVoice }?.roles ?: emptyList()
-    LaunchedEffect(vm.selectedVoice) {
-        if (vm.selectedRole.isNotBlank() && vm.selectedRole !in availableRoles) {
-            vm.selectedRole = ""
-        }
+    LaunchedEffect(vm.viewMode, vm.currentChapterId, vm.markupModeEnabled) {
+        if (vm.viewMode == 1 || (vm.viewMode == 0 && vm.markupModeEnabled)) vm.syncSegmentsFromText()
     }
 
     // ── Dialogs ───────────────────────────────────────────────────────────────
@@ -213,6 +211,24 @@ fun MainScreen(onTokenRefresh: () -> Unit) {
         )
     }
 
+    if (showTokenDialog) {
+        TokenDialog(
+            onDismiss = { showTokenDialog = false },
+            onSave = { token ->
+                TokenStorage.iamToken = token
+                showTokenDialog = false
+            },
+            onOpenHelp = {
+                showTokenDialog = false
+                vm.showHelpDialog = true
+            },
+        )
+    }
+
+    if (vm.showHelpDialog) {
+        HelpDialog(onDismiss = { vm.showHelpDialog = false })
+    }
+
     if (vm.showResetMarkupDialog) {
         AlertDialog(
             onDismissRequest = { vm.showResetMarkupDialog = false },
@@ -266,7 +282,10 @@ fun MainScreen(onTokenRefresh: () -> Unit) {
                     ) {
                         Text("Очистить всё")
                     }
-                    IconButton(onClick = onTokenRefresh) {
+                    TextButton(onClick = { vm.showHelpDialog = true }) {
+                        Text("Помощь")
+                    }
+                    IconButton(onClick = { showTokenDialog = true }) {
                         Text("\u2699", style = MaterialTheme.typography.titleLarge)
                     }
                 },
@@ -280,8 +299,8 @@ fun MainScreen(onTokenRefresh: () -> Unit) {
                 .fillMaxSize(),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            // View mode toggle (only when text has markers)
-            if (vm.hasMarkers) {
+            // View mode toggle (only in markup mode)
+            if (vm.markupModeEnabled) {
                 PrimaryTabRow(
                     selectedTabIndex = vm.viewMode,
                     modifier = Modifier.width(300.dp),
@@ -309,39 +328,66 @@ fun MainScreen(onTokenRefresh: () -> Unit) {
                 modifier = Modifier.weight(1f),
                 horizontalArrangement = Arrangement.spacedBy(12.dp),
             ) {
-                if (vm.viewMode == 0 || !vm.hasMarkers) {
-                    if (vm.hasMarkers) {
-                        // Split view: original text (read-only) | raw markup (editable)
-                        MarkupSplitView(
-                            originalText = vm.originalText.ifBlank {
-                                TextParser.parse(vm.text).joinToString("\n\n") { it.text }
-                            },
-                            markupText = vm.text,
-                            onMarkupTextChange = { newText ->
-                                vm.text = newText
-                            },
-                            validationResult = vm.validationResult,
-                            segments = vm.segments.toList(),
-                            onRevalidate = { vm.revalidate() },
-                            modifier = Modifier.weight(1f).fillMaxHeight(),
-                        )
-                    } else {
-                        OutlinedTextField(
-                            value = textFieldValue,
-                            onValueChange = { newValue ->
-                                textFieldValue = newValue
-                                vm.text = newValue.text
-                            },
-                            label = { Text("Текст для озвучивания") },
-                            modifier = Modifier.weight(1f).fillMaxHeight()
-                                .onKeyEvent { event ->
-                                    handleEditorKeys(event, textFieldValue) { newValue ->
-                                        textFieldValue = newValue
-                                        vm.text = newValue.text
-                                    }
+                if (vm.viewMode == 0 || !vm.markupModeEnabled) {
+                    if (vm.markupModeEnabled) {
+                        Column(modifier = Modifier.weight(1f).fillMaxHeight()) {
+                            // Split view: original text | raw markup (editable)
+                            MarkupSplitView(
+                                originalText = vm.originalText.ifBlank {
+                                    TextParser.parse(vm.text).joinToString("\n\n") { it.text }
                                 },
-                            minLines = 5,
-                        )
+                                markupText = vm.text,
+                                onMarkupTextChange = { newText ->
+                                    vm.text = newText
+                                },
+                                onOriginalTextChange = { newOriginal ->
+                                    vm.updateOriginalText(newOriginal)
+                                },
+                                validationResult = vm.validationResult,
+                                segments = vm.segments.toList(),
+                                onRevalidate = { vm.revalidate() },
+                                modifier = Modifier.weight(1f).fillMaxWidth(),
+                            )
+                            if (vm.detectedVoices.size <= 1) {
+                                OutlinedButton(
+                                    onClick = { vm.unwrapMarkup() },
+                                    enabled = !vm.isLoading,
+                                    modifier = Modifier.padding(top = 8.dp),
+                                ) {
+                                    Text("Обычный режим")
+                                }
+                            }
+                        }
+                    } else {
+                        Column(modifier = Modifier.weight(1f).fillMaxHeight()) {
+                            OutlinedTextField(
+                                value = textFieldValue,
+                                onValueChange = { newValue ->
+                                    textFieldValue = newValue
+                                    vm.text = newValue.text
+                                },
+                                label = { Text("Текст для озвучивания") },
+                                modifier = Modifier.fillMaxWidth().weight(1f)
+                                    .onKeyEvent { event ->
+                                        handleEditorKeys(event, textFieldValue) { newValue ->
+                                            textFieldValue = newValue
+                                            vm.text = newValue.text
+                                        }
+                                    },
+                                minLines = 5,
+                            )
+                            if (vm.text.isNotBlank()) {
+                                OutlinedButton(
+                                    onClick = {
+                                        if (vm.hasMarkers) vm.enableMarkupMode()
+                                        else vm.wrapTextAsMarkup()
+                                    },
+                                    modifier = Modifier.padding(top = 8.dp),
+                                ) {
+                                    Text("Режим разметки")
+                                }
+                            }
+                        }
                     }
                 } else {
                     SegmentsView(
@@ -365,68 +411,32 @@ fun MainScreen(onTokenRefresh: () -> Unit) {
                     )
                 }
 
-                // Voice mapping panel (visible when voices are configured)
-                if (vm.voiceMapping.isNotEmpty()) {
-                    val allVoiceNames = (vm.detectedVoices + vm.voiceMapping.keys).toList()
+                // Voice mapping panel (always visible)
+                val allVoiceNames = if (vm.markupModeEnabled) {
+                    (vm.detectedVoices + vm.voiceMapping.keys).toList()
                         .sortedWith(compareByDescending<String> { it in vm.detectedVoices }.thenBy { it })
-                    VoiceMappingPanel(
-                        voiceNames = allVoiceNames,
-                        activeVoiceNames = vm.detectedVoices,
-                        mapping = vm.voiceMapping,
-                        onSettingsChange = { name, settings ->
-                            vm.voiceMapping[name] = settings
-                            vm.saveVoiceMapping()
-                        },
-                        onRetryVoice = { vm.launchMultiVoiceSynthesis(retryVoice = it) },
-                        onMergeVoice = { from, to -> vm.mergeVoice(from, to) },
-                        onAddVoice = { name ->
-                            vm.voiceMapping[name] = VoiceSettings()
-                            vm.saveVoiceMapping()
-                        },
-                        onCleanupVoices = { vm.removeUnusedVoices() },
-                        isLoading = vm.isLoading,
-                        modifier = Modifier.width(350.dp).fillMaxHeight(),
-                    )
+                } else {
+                    listOf("voice_main")
                 }
-            }
-
-            // Simple synthesis controls (only when no markers)
-            if (!vm.hasMarkers) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(16.dp),
-                ) {
-                    DropdownSelector("Голос", API_VOICES, vm.selectedVoice) { vm.selectedVoice = it }
-                    DropdownSelector("Формат", FORMATS, vm.selectedFormat) { vm.selectedFormat = it }
-                    if (availableRoles.isNotEmpty()) {
-                        DropdownSelector(
-                            "Амплуа",
-                            listOf("") + availableRoles,
-                            vm.selectedRole,
-                            displayTransform = { it.ifBlank { "нет" } },
-                        ) { vm.selectedRole = it }
-                    }
-                }
-
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(16.dp),
-                ) {
-                    Text("Скорость: ${"%.1f".format(vm.speed)}")
-                    Slider(
-                        value = vm.speed.toFloat(),
-                        onValueChange = { vm.speed = it.toDouble() },
-                        valueRange = 0.1f..3.0f,
-                        modifier = Modifier.width(200.dp),
-                    )
-                    Text("Тон: ${"%.0f".format(vm.pitchShift)}")
-                    Slider(
-                        value = vm.pitchShift.toFloat(),
-                        onValueChange = { vm.pitchShift = it.toDouble() },
-                        valueRange = -1000f..1000f,
-                        modifier = Modifier.width(200.dp),
-                    )
-                }
+                val activeVoiceNames = if (vm.markupModeEnabled) vm.detectedVoices else setOf("voice_main")
+                VoiceMappingPanel(
+                    voiceNames = allVoiceNames,
+                    activeVoiceNames = activeVoiceNames,
+                    mapping = vm.voiceMapping,
+                    onSettingsChange = { name, settings ->
+                        vm.voiceMapping[name] = settings
+                        vm.saveVoiceMapping()
+                    },
+                    onRetryVoice = { vm.launchMultiVoiceSynthesis(retryVoice = it) },
+                    onMergeVoice = { from, to -> vm.mergeVoice(from, to) },
+                    onAddVoice = { name ->
+                        vm.voiceMapping[name] = VoiceSettings()
+                        vm.saveVoiceMapping()
+                    },
+                    onCleanupVoices = { vm.removeUnusedVoices() },
+                    isLoading = vm.isLoading,
+                    modifier = Modifier.width(350.dp).fillMaxHeight(),
+                )
             }
 
             // Action buttons
@@ -436,6 +446,10 @@ fun MainScreen(onTokenRefresh: () -> Unit) {
             ) {
                 Button(
                     onClick = {
+                        if (!TokenStorage.hasCredentials()) {
+                            showTokenDialog = true
+                            return@Button
+                        }
                         if (vm.viewMode == 1) vm.syncTextFromSegments()
                         if (vm.hasMarkers) {
                             vm.clearCache()
@@ -444,25 +458,35 @@ fun MainScreen(onTokenRefresh: () -> Unit) {
                             vm.launchSimpleSynthesis()
                         }
                     },
-                    enabled = vm.text.isNotBlank() && !vm.isLoading && TokenStorage.hasCredentials(),
+                    enabled = vm.text.isNotBlank() && !vm.isLoading,
                 ) {
                     Text("Озвучить")
                 }
 
                 OutlinedButton(
-                    onClick = { vm.launchAutoMarkup() },
-                    enabled = vm.text.isNotBlank() && !vm.isLoading && TokenStorage.hasCredentials() && !vm.hasMarkers,
+                    onClick = {
+                        if (!TokenStorage.hasCredentials()) {
+                            showTokenDialog = true
+                            return@OutlinedButton
+                        }
+                        vm.launchAutoMarkup()
+                    },
+                    enabled = vm.text.isNotBlank() && !vm.isLoading && !vm.markupModeEnabled,
                 ) {
                     Text("Авто-разметка")
                 }
 
-                if (vm.hasMarkers) {
+                if (vm.markupModeEnabled) {
                     OutlinedButton(
                         onClick = {
+                            if (!TokenStorage.hasCredentials()) {
+                                showTokenDialog = true
+                                return@OutlinedButton
+                            }
                             if (vm.viewMode == 1) vm.syncTextFromSegments()
                             vm.launchMultiVoiceSynthesis()
                         },
-                        enabled = vm.text.isNotBlank() && !vm.isLoading && TokenStorage.hasCredentials(),
+                        enabled = vm.text.isNotBlank() && !vm.isLoading,
                     ) {
                         Text("Повторить ошибки")
                     }
@@ -582,11 +606,13 @@ private fun MarkupSplitView(
     originalText: String,
     markupText: String,
     onMarkupTextChange: (String) -> Unit,
+    onOriginalTextChange: (String) -> Unit,
     validationResult: ValidationResult?,
     segments: List<TextSegment>,
     onRevalidate: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    var isEditingOriginal by remember { mutableStateOf(false) }
     val outlineColor = MaterialTheme.colorScheme.outline
     val onSurfaceColor = MaterialTheme.colorScheme.onSurface
     val labelStyle = MaterialTheme.typography.labelMedium
@@ -601,7 +627,18 @@ private fun MarkupSplitView(
             modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Text("Исходный текст", modifier = Modifier.weight(1f), style = labelStyle)
+            Text("Исходный текст", style = labelStyle)
+            OutlinedButton(
+                onClick = { isEditingOriginal = !isEditingOriginal },
+                modifier = Modifier.height(28.dp).padding(start = 8.dp),
+                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+            ) {
+                Text(
+                    if (isEditingOriginal) "Готово" else "Редактировать",
+                    style = labelStyle,
+                )
+            }
+            Spacer(modifier = Modifier.weight(1f))
             // Validation indicator
             if (validationResult != null) {
                 val validCount = validationResult.paragraphs.count { it.isValid }
@@ -675,27 +712,56 @@ private fun MarkupSplitView(
             }
         }
 
+        // TextFieldValue for original text editing
+        var originalFieldValue by remember { mutableStateOf(TextFieldValue(originalText)) }
+        LaunchedEffect(originalText) {
+            if (originalFieldValue.text != originalText) {
+                originalFieldValue = originalFieldValue.copy(text = originalText)
+            }
+        }
+
         Row(
             modifier = Modifier.fillMaxWidth().weight(1f),
         ) {
-            // Left: original text (read-only, selectable) with validation highlights
-            SelectionContainer(
-                modifier = Modifier
-                    .weight(1f)
-                    .fillMaxHeight()
-                    .padding(8.dp),
-            ) {
-                Box(modifier = Modifier.fillMaxSize().verticalScroll(leftScrollState)) {
-                    if (validationResult != null) {
-                        Text(
-                            text = buildValidatedOriginalAnnotatedString(validationResult, segments, bodyStyle),
-                            style = bodyStyle.copy(color = onSurfaceColor),
+            // Left: original text with optional editing
+            if (isEditingOriginal) {
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxHeight()
+                        .padding(8.dp),
+                ) {
+                    Box(modifier = Modifier.fillMaxSize().verticalScroll(leftScrollState)) {
+                        BasicTextField(
+                            value = originalFieldValue,
+                            onValueChange = { newValue ->
+                                originalFieldValue = newValue
+                                onOriginalTextChange(newValue.text)
+                            },
+                            textStyle = bodyStyle.copy(color = onSurfaceColor),
+                            modifier = Modifier.fillMaxWidth(),
                         )
-                    } else {
-                        Text(
-                            text = originalText,
-                            style = bodyStyle.copy(color = onSurfaceColor),
-                        )
+                    }
+                }
+            } else {
+                SelectionContainer(
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxHeight()
+                        .padding(8.dp),
+                ) {
+                    Box(modifier = Modifier.fillMaxSize().verticalScroll(leftScrollState)) {
+                        if (validationResult != null) {
+                            Text(
+                                text = buildValidatedOriginalAnnotatedString(validationResult, segments, bodyStyle),
+                                style = bodyStyle.copy(color = onSurfaceColor),
+                            )
+                        } else {
+                            Text(
+                                text = originalText,
+                                style = bodyStyle.copy(color = onSurfaceColor),
+                            )
+                        }
                     }
                 }
             }
