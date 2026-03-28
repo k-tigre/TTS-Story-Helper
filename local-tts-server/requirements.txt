@@ -7,3 +7,5 @@ omegaconf>=2.3.0
 PyYAML>=6.0
 # v5 .pt package unpickles code that imports scipy.signal (tts_package/package_utils.py)
 scipy>=1.10.0
+# Bundled ffmpeg binary (mp3/ogg) when system ffmpeg is not on PATH; pulled in on pip install.
+imageio-ffmpeg>=0.4.9

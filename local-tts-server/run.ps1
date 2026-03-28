@@ -9,7 +9,7 @@ if (-not (Test-Path $venvPython)) {
     Write-Host "Creating venv..."
     python -m venv .venv
 }
-# Always sync deps (e.g. after requirements.txt adds omegaconf / PyYAML for Silero)
+# Always sync deps (includes imageio-ffmpeg: bundled ffmpeg for MP3/OGG if not in PATH)
 & (Join-Path $here ".venv\Scripts\pip.exe") install -r requirements.txt
 
 & $venvPython -m uvicorn main:app --host 127.0.0.1 --port 8765

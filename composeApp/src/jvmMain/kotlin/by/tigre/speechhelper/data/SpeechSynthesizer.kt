@@ -33,6 +33,7 @@ object SpeechSynthesizer {
                 settings = localSettings,
                 speed = voiceSettings.speed,
                 pitchShift = voiceSettings.pitchShift,
+                outputFormat = outputFormat,
             )
     }
 }

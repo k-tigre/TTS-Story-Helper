@@ -48,20 +48,27 @@ object LocalTtsApi {
         settings: LocalTtsSettings,
         speed: Double = 1.0,
         pitchShift: Double = 0.0,
+        outputFormat: String,
     ): Flow<SynthesisResult> = flow {
         val chunks = SynthesisChunking.splitText(text, CHUNK_LIMIT)
         if (chunks.size == 1) {
             emit(SynthesisResult.InProgress("Локальный синтез..."))
-            val bytes = synthesizeChunk(chunks[0], speaker, settings, speed, pitchShift)
+            val bytes = synthesizeChunk(chunks[0], speaker, settings, speed, pitchShift, outputFormat)
             emit(SynthesisResult.Done(bytes))
             return@flow
         }
-        val wavParts = ArrayList<ByteArray>(chunks.size)
+        val parts = ArrayList<ByteArray>(chunks.size)
         for ((i, chunk) in chunks.withIndex()) {
             emit(SynthesisResult.InProgress("Локальный синтез: чанк ${i + 1} из ${chunks.size}"))
-            wavParts.add(synthesizeChunk(chunk, speaker, settings, speed, pitchShift))
+            parts.add(synthesizeChunk(chunk, speaker, settings, speed, pitchShift, outputFormat))
         }
-        emit(SynthesisResult.Done(WavMerge.merge(wavParts)))
+        val merged =
+            if (outputFormat == "wav") {
+                WavMerge.merge(parts)
+            } else {
+                parts.reduce { acc, b -> acc + b }
+            }
+        emit(SynthesisResult.Done(merged))
     }
 
     private suspend fun synthesizeChunk(
@@ -70,6 +77,7 @@ object LocalTtsApi {
         settings: LocalTtsSettings,
         speed: Double,
         pitchShift: Double,
+        outputFormat: String,
     ): ByteArray {
         val url = settings.baseUrl.trimEnd('/') + "/synthesize"
         val response = client.post(url) {
@@ -82,6 +90,7 @@ object LocalTtsApi {
                     modelId = settings.modelId,
                     speed = speed,
                     pitchShift = pitchShift,
+                    outputFormat = outputFormat,
                 ),
             )
         }
@@ -103,4 +112,5 @@ private data class LocalSynRequest(
     @SerialName("model_id") val modelId: String,
     val speed: Double = 1.0,
     @SerialName("pitch_shift") val pitchShift: Double = 0.0,
+    @SerialName("output_format") val outputFormat: String,
 )

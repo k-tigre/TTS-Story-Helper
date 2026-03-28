@@ -531,7 +531,7 @@ class MainViewModel(private val scope: CoroutineScope) {
 
     fun launchSimpleSynthesis() {
         val settings = voiceMapping["voice_main"] ?: VoiceSettings()
-        val outputFormat = if (synthesisBackend == SynthesisBackend.Local) "wav" else selectedFormat
+        val outputFormat = selectedFormat
         scope.launch {
             isLoading = true
             statusMessage = ""
@@ -578,8 +578,8 @@ class MainViewModel(private val scope: CoroutineScope) {
             statusMessage = ""
             progressMessage = ""
             val isLocal = synthesisBackend == SynthesisBackend.Local
-            val partExt = if (isLocal) "wav" else "mp3"
-            val outputFormat = if (isLocal) "wav" else "mp3"
+            val outputFormat = if (isLocal) selectedFormat else "mp3"
+            val partExt = outputFormat
             try {
                 val cacheDir = withContext(Dispatchers.IO) {
                     SessionStorage.getChapterCacheDir(currentChapterId)
@@ -631,11 +631,12 @@ class MainViewModel(private val scope: CoroutineScope) {
                 if (allParts.isEmpty()) {
                     statusMessage = "Ошибка: ни один сегмент не озвучен"
                 } else {
-                    val combined = if (isLocal) {
-                        WavMerge.merge(allParts)
-                    } else {
-                        allParts.reduce { acc, bytes -> acc + bytes }
-                    }
+                    val combined =
+                        if (outputFormat == "wav") {
+                            WavMerge.merge(allParts)
+                        } else {
+                            allParts.reduce { acc, bytes -> acc + bytes }
+                        }
                     val chapterName = chapters.find { it.id == currentChapterId }?.name ?: ""
                     val filePath = saveAudioFile(combined, outputFormat, currentBookName, chapterName)
                     SessionStorage.setChapterAudioPath(currentChapterId, filePath)

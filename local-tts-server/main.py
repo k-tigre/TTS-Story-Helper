@@ -7,12 +7,15 @@ Run (after venv + pip install -r requirements.txt):
 First request downloads the model via torch.hub (needs network once).
 
 Dependencies: omegaconf + PyYAML (hub / models.yml); scipy (v5 packaged model imports scipy.signal).
+Для output_format mp3/ogg: сначала ищется ffmpeg в PATH, иначе бинарник из пакета imageio-ffmpeg (ставится pip install -r requirements.txt).
 """
 from __future__ import annotations
 
 import io
 import logging
 import re
+import shutil
+import subprocess
 import traceback
 import wave
 import xml.sax.saxutils as xml_esc
@@ -85,9 +88,84 @@ class SynthesizeRequest(BaseModel):
     speaker: str = "baya"
     sample_rate: int = Field(default=48000, ge=8000, le=48000)
     model_id: str = "v5_ru"
+    # wav | mp3 | ogg — как containerAudio у Yandex v3 (для mp3/ogg нужен ffmpeg в PATH).
+    output_format: str = Field(default="wav")
     # Same semantics as desktop app (Yandex-like); mapped to SSML prosody for Silero v5.
     speed: float = Field(default=1.0, ge=0.1, le=3.0)
     pitch_shift: float = Field(default=0.0, ge=-1000.0, le=1000.0)
+
+
+def _normalize_output_format(raw: str) -> str:
+    t = (raw or "wav").strip().lower()
+    if t not in ("wav", "mp3", "ogg"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"unsupported output_format {raw!r}; use wav, mp3, or ogg",
+        )
+    return t
+
+
+def _ffmpeg_exe() -> str:
+    """System ffmpeg if on PATH; else bundled exe from imageio-ffmpeg (pip dependency)."""
+    path = shutil.which("ffmpeg")
+    if path:
+        return path
+    try:
+        import imageio_ffmpeg
+
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except ImportError as e:
+        raise HTTPException(
+            status_code=503,
+            detail="ffmpeg not found: pip install imageio-ffmpeg or add ffmpeg to PATH",
+        ) from e
+    except RuntimeError as e:
+        raise HTTPException(
+            status_code=503,
+            detail=f"ffmpeg not available: {e}",
+        ) from e
+
+
+def _encode_wav_with_ffmpeg(wav_bytes: bytes, container: str) -> bytes:
+    exe = _ffmpeg_exe()
+    if container == "mp3":
+        extra = ["-codec:a", "libmp3lame", "-b:a", "192k", "-f", "mp3"]
+    elif container == "ogg":
+        extra = ["-c:a", "libopus", "-b:a", "64000", "-f", "ogg"]
+    else:
+        raise ValueError(container)
+    proc = subprocess.run(
+        [
+            exe,
+            "-nostdin",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            "wav",
+            "-i",
+            "pipe:0",
+            *extra,
+            "pipe:1",
+        ],
+        input=wav_bytes,
+        capture_output=True,
+        timeout=600,
+    )
+    if proc.returncode != 0:
+        err = proc.stderr.decode("utf-8", errors="replace")
+        raise HTTPException(status_code=500, detail=f"ffmpeg encode failed: {err}") from None
+    if not proc.stdout:
+        raise HTTPException(status_code=500, detail="ffmpeg produced empty output")
+    return proc.stdout
+
+
+def _response_audio(wav_bytes: bytes, fmt: str) -> Response:
+    if fmt == "wav":
+        return Response(content=wav_bytes, media_type="audio/wav")
+    body = _encode_wav_with_ffmpeg(wav_bytes, fmt)
+    media = "audio/mpeg" if fmt == "mp3" else "audio/ogg"
+    return Response(content=body, media_type=media)
 
 
 @app.get("/health")
@@ -97,14 +175,12 @@ def health() -> dict:
 
 @app.post("/synthesize")
 def synthesize(req: SynthesizeRequest) -> Response:
+    fmt = _normalize_output_format(req.output_format)
     text = _sanitize_v5_ru_tts_text(req.text)
     if not text:
-        # Multi-chunk client: a slice may be only Latin/^/emoji — still need a valid WAV for merge.
+        # Multi-chunk client: a slice may be only Latin/^/emoji — still need valid audio for merge.
         log.debug("Empty after sanitize; returning short silence (sample_rate=%s)", req.sample_rate)
-        return Response(
-            content=_silence_wav_bytes(int(req.sample_rate), duration_ms=120),
-            media_type="audio/wav",
-        )
+        return _response_audio(_silence_wav_bytes(int(req.sample_rate), duration_ms=120), fmt)
     try:
         model = _load_model(req.model_id)
     except Exception as e:
@@ -141,7 +217,7 @@ def synthesize(req: SynthesizeRequest) -> Response:
         wf.setframerate(int(req.sample_rate))
         wf.writeframes(pcm_bytes)
 
-    return Response(content=buf.getvalue(), media_type="audio/wav")
+    return _response_audio(buf.getvalue(), fmt)
 
 
 def _speed_to_ssml_rate(speed: float) -> str | None:
