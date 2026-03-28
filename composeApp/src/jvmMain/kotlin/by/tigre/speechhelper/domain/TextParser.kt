@@ -1,5 +1,8 @@
 package by.tigre.speechhelper.domain
 
+import java.text.Normalizer
+import java.util.Locale
+
 data class TextSegment(
     val voiceName: String?,
     val text: String,
@@ -9,8 +12,14 @@ data class ParagraphMapping(
     val originalParagraph: String,
     val matchedSegmentIndices: List<Int>,
     val isValid: Boolean,
+    /** Normalized tokens present in markup but not in original (diagnostics). */
     val extraInMarkup: List<String>,
+    /** Normalized tokens in original missing from markup (diagnostics). */
     val missingInMarkup: List<String>,
+    /** Indices into whitespace-split tokens of stripped original; highlight as missing in markup. */
+    val missingOriginalWordIndices: Set<Int> = emptySet(),
+    /** Per segment: indices of significant (non-punctuation-only) words extra vs original. */
+    val extraMarkupSignificantWordIndicesBySegment: Map<Int, Set<Int>> = emptyMap(),
 )
 
 data class ValidationResult(
@@ -22,6 +31,19 @@ data class ValidationResult(
 object TextParser {
 
     private val TAG_REGEX = Regex("""\[([^]/]+)](.*?)\[/\1]""", RegexOption.DOT_MATCHES_ALL)
+
+    /**
+     * Word boundaries for comparison: Unicode separators (\p{Z}) **and** line breaks (\R),
+     * so NBSP / narrow space / перевод строки внутри абзаца не склеивают слова (в отличие от `\s+` в Java).
+     */
+    private val UNICODE_SPACE_SPLIT = Regex("(?:\\R|\\p{Z})+")
+
+    /**
+     * Split plain text into whitespace-separated tokens for comparison and highlight indices.
+     * Matches how [stripMarkup] collapses spaces.
+     */
+    fun splitCompareWhitespace(text: String): List<String> =
+        text.split(UNICODE_SPACE_SPLIT).filter { it.isNotBlank() }
 
     fun parse(input: String): List<TextSegment> {
         val segments = mutableListOf<TextSegment>()
@@ -65,12 +87,23 @@ object TextParser {
     }
 
     /**
-     * Extract words from text for comparison: strip markup, split by whitespace, lowercase.
-     * Strict comparison — words are compared as-is (with punctuation), only lowercased.
+     * For comparison: NFKC, letters and digits only, lowercased; Russian **ё → е** (often differs after copy-paste).
+     * Dashes, quotes, brackets, etc. are stripped from the token.
+     */
+    fun normalizeCompareToken(token: String): String {
+        val nfkc = Normalizer.normalize(token, Normalizer.Form.NFKC)
+        val lettersDigits = Regex("[^\\p{L}\\p{N}]+").replace(nfkc, "").lowercase(Locale.ROOT)
+        return lettersDigits.replace('ё', 'е')
+    }
+
+    /**
+     * Strip markup, split by whitespace, keep only tokens that have at least one letter or digit after normalization.
      */
     fun extractCompareWords(text: String): List<String> {
         val stripped = stripMarkup(text)
-        return stripped.split(Regex("\\s+")).filter { it.isNotBlank() }.map { it.lowercase() }
+        return splitCompareWhitespace(stripped)
+            .map { normalizeCompareToken(it) }
+            .filter { it.isNotEmpty() }
     }
 
     // ── Markup stripping ────────────────────────────────────────────────────
@@ -80,7 +113,7 @@ object TextParser {
     fun stripMarkup(text: String): String {
         var result = TAG_REGEX.replace(text) { it.groupValues[2] }
         result = PAUSE_REGEX.replace(result, "")
-        return result.replace(Regex("\\s+"), " ").trim()
+        return result.replace(UNICODE_SPACE_SPLIT, " ").trim()
     }
 
     // ── LCS utilities ────────────────────────────────────────────────────────
@@ -157,27 +190,41 @@ object TextParser {
             )
         }
 
-        // Build flat word list from all segments, tracking which segment each word belongs to
-        val flatWords = mutableListOf<String>()
-        val wordToSegIdx = mutableListOf<Int>()
+        data class OrigSigToken(val displayIndex: Int, val normalized: String)
+        data class FlatSigToken(
+            val segmentIndex: Int,
+            val sigIndexInSegment: Int,
+            val normalized: String,
+        )
+
+        val flatTokens = mutableListOf<FlatSigToken>()
         for ((segIdx, seg) in segments.withIndex()) {
-            val words = extractCompareWords(seg.text)
-            for (w in words) {
-                flatWords.add(w)
-                wordToSegIdx.add(segIdx)
+            val inner = stripMarkup(seg.text)
+            val toks = splitCompareWhitespace(inner)
+            var sigIdxInSeg = 0
+            for (w in toks) {
+                val n = normalizeCompareToken(w)
+                if (n.isNotEmpty()) {
+                    flatTokens.add(FlatSigToken(segIdx, sigIdxInSeg, n))
+                    sigIdxInSeg++
+                }
             }
         }
+        val flatNorms = flatTokens.map { it.normalized }
 
-        val origParaWords = origParagraphs.map { extractCompareWords(it) }
-
-        // Track usage
         val usedSegmentIndices = mutableSetOf<Int>()
         var flatWordPos = 0
 
-        val mappings = origParagraphs.mapIndexed { paraIdx, origPara ->
-            val origWords = origParaWords[paraIdx]
+        val mappings = origParagraphs.mapIndexed { _, origPara ->
+            val strippedPara = stripMarkup(origPara)
+            val displayToks = splitCompareWhitespace(strippedPara)
+            val origSignificant = mutableListOf<OrigSigToken>()
+            displayToks.forEachIndexed { dispIdx, w ->
+                val n = normalizeCompareToken(w)
+                if (n.isNotEmpty()) origSignificant.add(OrigSigToken(dispIdx, n))
+            }
 
-            if (origWords.isEmpty()) {
+            if (origSignificant.isEmpty()) {
                 return@mapIndexed ParagraphMapping(
                     originalParagraph = origPara,
                     matchedSegmentIndices = emptyList(),
@@ -187,8 +234,8 @@ object TextParser {
                 )
             }
 
-            // Try to match this paragraph's words starting from current flatWordPos
-            val matchResult = tryMatchSequence(origWords, flatWords, flatWordPos)
+            val origSigs = origSignificant.map { it.normalized }
+            val matchResult = tryMatchSequence(origSigs, flatNorms, flatWordPos)
 
             if (matchResult == null) {
                 ParagraphMapping(
@@ -196,24 +243,36 @@ object TextParser {
                     matchedSegmentIndices = emptyList(),
                     isValid = false,
                     extraInMarkup = emptyList(),
-                    missingInMarkup = origWords,
+                    missingInMarkup = origSigs,
                 )
             } else {
                 val (_, consumedUpTo) = matchResult
-                // Which segments were involved
                 val involvedSegments = (flatWordPos until consumedUpTo)
-                    .map { wordToSegIdx[it] }
+                    .map { flatTokens[it].segmentIndex }
                     .distinct()
                     .sorted()
                 usedSegmentIndices.addAll(involvedSegments)
 
-                // Detailed word diff via LCS
-                val markupWordsSlice = flatWords.subList(flatWordPos, consumedUpTo)
-                val matchedOrigIndices = lcsIndicesA(origWords, markupWordsSlice)
-                val matchedMarkupIndices = lcsIndicesB(origWords, markupWordsSlice)
+                val markupNormSlice = flatNorms.subList(flatWordPos, consumedUpTo)
+                val matchedOrigSig = lcsIndicesA(origSigs, markupNormSlice)
+                val matchedMarkupSig = lcsIndicesB(origSigs, markupNormSlice)
 
-                val missing = origWords.filterIndexed { i, _ -> i !in matchedOrigIndices }
-                val extra = markupWordsSlice.filterIndexed { i, _ -> i !in matchedMarkupIndices }
+                val missing = origSigs.filterIndexed { i, _ -> i !in matchedOrigSig }
+                val extra = markupNormSlice.filterIndexed { i, _ -> i !in matchedMarkupSig }
+
+                val missingOriginalWordIndices = origSignificant
+                    .mapIndexedNotNull { sigRank, t -> if (sigRank !in matchedOrigSig) t.displayIndex else null }
+                    .toSet()
+
+                val extraMarkupSignificantWordIndicesBySegment = mutableMapOf<Int, MutableSet<Int>>()
+                for (i in markupNormSlice.indices) {
+                    if (i !in matchedMarkupSig) {
+                        val ft = flatTokens[flatWordPos + i]
+                        extraMarkupSignificantWordIndicesBySegment
+                            .getOrPut(ft.segmentIndex) { mutableSetOf() }
+                            .add(ft.sigIndexInSegment)
+                    }
+                }
 
                 flatWordPos = consumedUpTo
 
@@ -223,6 +282,8 @@ object TextParser {
                     isValid = missing.isEmpty() && extra.isEmpty(),
                     extraInMarkup = extra,
                     missingInMarkup = missing,
+                    missingOriginalWordIndices = missingOriginalWordIndices,
+                    extraMarkupSignificantWordIndicesBySegment = extraMarkupSignificantWordIndicesBySegment,
                 )
             }
         }

@@ -29,13 +29,12 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import by.tigre.speechhelper.TokenStorage
 import by.tigre.speechhelper.data.AudioPlayer
-import by.tigre.speechhelper.data.SpeechKitApi
 import by.tigre.speechhelper.data.SynthesisResult
 import by.tigre.speechhelper.domain.API_VOICES_INFO
 import by.tigre.speechhelper.domain.TextSegment
 import by.tigre.speechhelper.domain.VoiceSettings
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 
@@ -43,6 +42,7 @@ import kotlinx.coroutines.launch
 fun SegmentsView(
     segments: List<TextSegment>,
     voiceMapping: Map<String, VoiceSettings>,
+    synthesizeAudio: (String, VoiceSettings) -> Flow<SynthesisResult>,
     onSegmentTextChange: (index: Int, newText: String) -> Unit,
     onRemarkupSegment: (index: Int) -> Unit,
     onSplitSegment: (index: Int, parts: List<String>) -> Unit,
@@ -188,15 +188,7 @@ fun SegmentsView(
                                     playingIndex = index
                                     scope.launch {
                                         try {
-                                            SpeechKitApi.synthesize(
-                                                text = segment.text,
-                                                voice = settings.voice,
-                                                role = settings.role.ifBlank { null },
-                                                speed = settings.speed,
-                                                pitchShift = settings.pitchShift,
-                                                format = "wav",
-                                                token = TokenStorage.iamToken,
-                                            ).collectLatest { result ->
+                                            synthesizeAudio(segment.text, settings).collectLatest { result ->
                                                 when (result) {
                                                     is SynthesisResult.InProgress -> {}
                                                     is SynthesisResult.Done -> AudioPlayer.play(result.bytes)
