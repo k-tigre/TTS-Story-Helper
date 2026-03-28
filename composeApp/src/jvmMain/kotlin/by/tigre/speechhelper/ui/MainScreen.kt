@@ -1,6 +1,10 @@
 package by.tigre.speechhelper.ui
 
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.border
+import androidx.compose.foundation.gestures.BringIntoViewSpec
+import androidx.compose.foundation.gestures.LocalBringIntoViewSpec
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.PaddingValues
@@ -38,15 +42,24 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.VerticalDivider
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.layout.LayoutCoordinates
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.input.key.Key
@@ -55,8 +68,10 @@ import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
-import androidx.compose.ui.input.key.onKeyEvent
+import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.unit.dp
@@ -64,10 +79,12 @@ import by.tigre.speechhelper.TokenStorage
 import by.tigre.speechhelper.data.SessionStorage
 import by.tigre.speechhelper.domain.LOCAL_TTS_SAMPLE_RATES
 import by.tigre.speechhelper.domain.SynthesisBackend
+import by.tigre.speechhelper.domain.ParagraphMapping
 import by.tigre.speechhelper.domain.TextParser
 import by.tigre.speechhelper.domain.TextSegment
 import by.tigre.speechhelper.domain.ValidationResult
 import by.tigre.speechhelper.domain.VoiceSettings
+import kotlin.math.roundToInt
 import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.debounce
@@ -396,7 +413,7 @@ fun MainScreen() {
                                 },
                                 label = { Text("Текст для озвучивания") },
                                 modifier = Modifier.fillMaxWidth().weight(1f)
-                                    .onKeyEvent { event ->
+                                    .onPreviewKeyEvent { event ->
                                         handleEditorKeys(event, textFieldValue) { newValue ->
                                             textFieldValue = newValue
                                             vm.text = newValue.text
@@ -692,7 +709,7 @@ private fun handleEditorKeys(
     val text = value.text
     val cursor = value.selection.start
     return when (event.key) {
-        Key.MoveHome -> {
+        Key.MoveHome, Key.Home -> {
             val lineStart = text.lastIndexOf('\n', cursor - 1) + 1
             onChange(value.copy(selection = TextRange(lineStart)))
             true
@@ -713,6 +730,74 @@ private fun handleEditorKeys(
             true
         }
         else -> false
+    }
+}
+
+// Nested verticalScroll + BasicTextField: default bring-into-view on focus/click resets scroll on
+// Desktop and, via proportional sync, the other pane (see JetBrains/compose-multiplatform#4014).
+private val IgnoreBringIntoViewForScrollParent: BringIntoViewSpec = object : BringIntoViewSpec {
+    override fun calculateScrollDistance(offset: Float, size: Float, containerSize: Float): Float = 0f
+}
+
+private val LocalMarkupScrollViewportHeightPx = compositionLocalOf { 0 }
+
+/** Keeps the text cursor in view when selection moves; does not use bring-into-view (see #4014 workaround). */
+@Composable
+private fun VerticalScrollRevealCursorEffect(
+    scrollState: ScrollState,
+    selection: TextRange,
+    textLayoutResult: TextLayoutResult?,
+    fieldCoordinates: LayoutCoordinates?,
+    viewportHeightPx: Int,
+) {
+    val layoutState = rememberUpdatedState(textLayoutResult)
+    val fieldState = rememberUpdatedState(fieldCoordinates)
+    val density = LocalDensity.current
+    val marginPx = remember(density) { with(density) { 8.dp.toPx() } }
+    LaunchedEffect(selection.start, selection.end, viewportHeightPx, marginPx) {
+        val layout = layoutState.value ?: return@LaunchedEffect
+        val field = fieldState.value ?: return@LaunchedEffect
+        val scrollContent = field.parentLayoutCoordinates ?: return@LaunchedEffect
+        if (!field.isAttached || !scrollContent.isAttached) return@LaunchedEffect
+        if (viewportHeightPx <= 0) return@LaunchedEffect
+
+        val textLen = layout.layoutInput.text.length
+        val anchor = selection.start.coerceIn(0, textLen)
+        val cursorRect = layout.getCursorRect(anchor)
+        val fieldTopInContent = scrollContent.localPositionOf(field, Offset.Zero)
+        val cursorTop = fieldTopInContent.y + cursorRect.top
+        val cursorBottom = cursorTop + cursorRect.height
+
+        val vh = viewportHeightPx.toFloat()
+        val y = scrollState.value.toFloat()
+        val target = when {
+            cursorTop < y + marginPx -> (cursorTop - marginPx).coerceAtLeast(0f)
+            cursorBottom > y + vh - marginPx -> (cursorBottom - vh + marginPx).coerceAtLeast(0f)
+            else -> return@LaunchedEffect
+        }
+        val maxScroll = scrollState.maxValue.coerceAtLeast(0)
+        scrollState.scrollTo(target.roundToInt().coerceIn(0, maxScroll))
+    }
+}
+
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun MarkupSyncedScrollColumn(
+    scrollState: ScrollState,
+    modifier: Modifier = Modifier,
+    content: @Composable () -> Unit,
+) {
+    var viewportHeightPx by remember { mutableIntStateOf(0) }
+    CompositionLocalProvider(LocalBringIntoViewSpec provides IgnoreBringIntoViewForScrollParent) {
+        Box(
+            modifier = modifier
+                .onSizeChanged { viewportHeightPx = it.height }
+                .verticalScroll(scrollState),
+        ) {
+            CompositionLocalProvider(LocalMarkupScrollViewportHeightPx provides viewportHeightPx) {
+                content()
+            }
+        }
     }
 }
 
@@ -821,19 +906,45 @@ private fun MarkupSplitView(
                 }
         }
 
-        // TextFieldValue for cursor stability in markup panel
-        var markupFieldValue by remember { mutableStateOf(TextFieldValue(markupText)) }
-        LaunchedEffect(markupText) {
+        // Markup field: annotated string must equal raw markup exactly (same as original pane).
+        var markupFieldValue by remember {
+            mutableStateOf(
+                TextFieldValue(buildValidatedMarkupAnnotatedExact(markupText, validationResult, onSurfaceColor)),
+            )
+        }
+        LaunchedEffect(markupText, validationResult, onSurfaceColor) {
+            val ann = buildValidatedMarkupAnnotatedExact(markupText, validationResult, onSurfaceColor)
             if (markupFieldValue.text != markupText) {
-                markupFieldValue = markupFieldValue.copy(text = markupText)
+                markupFieldValue = TextFieldValue(ann, TextRange(markupText.length))
+            } else {
+                val sel = markupFieldValue.selection
+                val len = markupText.length
+                markupFieldValue = TextFieldValue(
+                    annotatedString = ann,
+                    selection = TextRange(sel.min.coerceIn(0, len), sel.max.coerceIn(0, len)),
+                    composition = markupFieldValue.composition,
+                )
             }
         }
 
-        // TextFieldValue for original text editing
-        var originalFieldValue by remember { mutableStateOf(TextFieldValue(originalText)) }
-        LaunchedEffect(originalText) {
+        // Single field: annotated text must match plain text byte-for-byte (no overlay mismatch).
+        var originalFieldValue by remember {
+            mutableStateOf(
+                TextFieldValue(buildValidatedOriginalAnnotatedExact(originalText, validationResult)),
+            )
+        }
+        LaunchedEffect(originalText, validationResult) {
+            val ann = buildValidatedOriginalAnnotatedExact(originalText, validationResult)
             if (originalFieldValue.text != originalText) {
-                originalFieldValue = originalFieldValue.copy(text = originalText)
+                originalFieldValue = TextFieldValue(ann, TextRange(originalText.length))
+            } else {
+                val sel = originalFieldValue.selection
+                val len = originalText.length
+                originalFieldValue = TextFieldValue(
+                    annotatedString = ann,
+                    selection = TextRange(sel.min.coerceIn(0, len), sel.max.coerceIn(0, len)),
+                    composition = originalFieldValue.composition,
+                )
             }
         }
 
@@ -848,34 +959,60 @@ private fun MarkupSplitView(
                         .fillMaxHeight()
                         .padding(8.dp),
                 ) {
-                    Box(modifier = Modifier.fillMaxSize().verticalScroll(leftScrollState)) {
-                        if (validationResult != null) {
-                            Box(modifier = Modifier.fillMaxWidth()) {
-                                Text(
-                                    text = buildValidatedOriginalAnnotatedString(validationResult, segments),
-                                    style = bodyStyle.copy(color = onSurfaceColor),
-                                    modifier = Modifier.fillMaxWidth(),
-                                )
-                                BasicTextField(
-                                    value = originalFieldValue,
-                                    onValueChange = { newValue ->
-                                        originalFieldValue = newValue
-                                        onOriginalTextChange(newValue.text)
-                                    },
-                                    textStyle = bodyStyle.copy(color = Color.Transparent),
-                                    cursorBrush = SolidColor(onSurfaceColor),
-                                    modifier = Modifier.fillMaxWidth(),
-                                )
-                            }
-                        } else {
+                    MarkupSyncedScrollColumn(
+                        scrollState = leftScrollState,
+                        modifier = Modifier.fillMaxSize(),
+                    ) {
+                        var originalLayoutResult by remember { mutableStateOf<TextLayoutResult?>(null) }
+                        var originalFieldCoords by remember { mutableStateOf<LayoutCoordinates?>(null) }
+                        val originalViewportPx = LocalMarkupScrollViewportHeightPx.current
+                        VerticalScrollRevealCursorEffect(
+                            scrollState = leftScrollState,
+                            selection = originalFieldValue.selection,
+                            textLayoutResult = originalLayoutResult,
+                            fieldCoordinates = originalFieldCoords,
+                            viewportHeightPx = originalViewportPx,
+                        )
+                        Column(modifier = Modifier.fillMaxWidth()) {
                             BasicTextField(
                                 value = originalFieldValue,
                                 onValueChange = { newValue ->
-                                    originalFieldValue = newValue
-                                    onOriginalTextChange(newValue.text)
+                                    val textChanged = newValue.text != originalFieldValue.text
+                                    val plain = newValue.text
+                                    val ann = buildValidatedOriginalAnnotatedExact(plain, validationResult)
+                                    originalFieldValue = TextFieldValue(
+                                        annotatedString = ann,
+                                        selection = newValue.selection,
+                                        composition = newValue.composition,
+                                    )
+                                    if (textChanged) onOriginalTextChange(plain)
                                 },
+                                onTextLayout = { originalLayoutResult = it },
                                 textStyle = bodyStyle.copy(color = onSurfaceColor),
-                                modifier = Modifier.fillMaxWidth(),
+                                cursorBrush = SolidColor(onSurfaceColor),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .onGloballyPositioned { originalFieldCoords = it }
+                                    .onPreviewKeyEvent { event ->
+                                        handleEditorKeys(event, originalFieldValue) { newValue ->
+                                            val changed = newValue.text != originalFieldValue.text
+                                            val ann = buildValidatedOriginalAnnotatedExact(
+                                                newValue.text,
+                                                validationResult,
+                                            )
+                                            originalFieldValue = TextFieldValue(
+                                                annotatedString = ann,
+                                                selection = newValue.selection,
+                                                composition = newValue.composition,
+                                            )
+                                            if (changed) onOriginalTextChange(newValue.text)
+                                        }
+                                    },
+                            )
+                            UnmatchedOriginalFooter(
+                                validationResult = validationResult,
+                                segments = segments,
+                                labelStyle = labelStyle,
                             )
                         }
                     }
@@ -887,16 +1024,19 @@ private fun MarkupSplitView(
                         .fillMaxHeight()
                         .padding(8.dp),
                 ) {
-                    Box(modifier = Modifier.fillMaxSize().verticalScroll(leftScrollState)) {
-                        if (validationResult != null) {
+                    MarkupSyncedScrollColumn(
+                        scrollState = leftScrollState,
+                        modifier = Modifier.fillMaxSize(),
+                    ) {
+                        Column(modifier = Modifier.fillMaxWidth()) {
                             Text(
-                                text = buildValidatedOriginalAnnotatedString(validationResult, segments),
+                                text = buildValidatedOriginalAnnotatedExact(originalText, validationResult),
                                 style = bodyStyle.copy(color = onSurfaceColor),
                             )
-                        } else {
-                            Text(
-                                text = originalText,
-                                style = bodyStyle.copy(color = onSurfaceColor),
+                            UnmatchedOriginalFooter(
+                                validationResult = validationResult,
+                                segments = segments,
+                                labelStyle = labelStyle,
                             )
                         }
                     }
@@ -905,50 +1045,63 @@ private fun MarkupSplitView(
 
             VerticalDivider()
 
-            // Right: markup — highlights under transparent field while editing
+            // Right: markup with validation highlights in-field (no overlay).
             Box(
                 modifier = Modifier
                     .weight(1f)
                     .fillMaxHeight()
                     .padding(8.dp),
             ) {
-                val markupDisplaySegments = remember(markupFieldValue.text) {
-                    TextParser.parse(markupFieldValue.text)
-                }
-                Box(modifier = Modifier.fillMaxSize().verticalScroll(rightScrollState)) {
-                    if (validationResult != null) {
-                        Box(modifier = Modifier.fillMaxWidth()) {
-                            Text(
-                                text = buildValidatedMarkupAnnotatedString(
-                                    markupDisplaySegments,
-                                    validationResult,
-                                    onSurfaceColor,
-                                ),
-                                style = bodyStyle.copy(color = onSurfaceColor),
-                                modifier = Modifier.fillMaxWidth(),
+                MarkupSyncedScrollColumn(
+                    scrollState = rightScrollState,
+                    modifier = Modifier.fillMaxSize(),
+                ) {
+                    var markupLayoutResult by remember { mutableStateOf<TextLayoutResult?>(null) }
+                    var markupFieldCoords by remember { mutableStateOf<LayoutCoordinates?>(null) }
+                    val markupViewportPx = LocalMarkupScrollViewportHeightPx.current
+                    VerticalScrollRevealCursorEffect(
+                        scrollState = rightScrollState,
+                        selection = markupFieldValue.selection,
+                        textLayoutResult = markupLayoutResult,
+                        fieldCoordinates = markupFieldCoords,
+                        viewportHeightPx = markupViewportPx,
+                    )
+                    BasicTextField(
+                        value = markupFieldValue,
+                        onValueChange = { newValue ->
+                            val textChanged = newValue.text != markupFieldValue.text
+                            val plain = newValue.text
+                            val ann = buildValidatedMarkupAnnotatedExact(plain, validationResult, onSurfaceColor)
+                            markupFieldValue = TextFieldValue(
+                                annotatedString = ann,
+                                selection = newValue.selection,
+                                composition = newValue.composition,
                             )
-                            BasicTextField(
-                                value = markupFieldValue,
-                                onValueChange = { newValue ->
-                                    markupFieldValue = newValue
-                                    onMarkupTextChange(newValue.text)
-                                },
-                                textStyle = bodyStyle.copy(color = Color.Transparent),
-                                cursorBrush = SolidColor(onSurfaceColor),
-                                modifier = Modifier.fillMaxWidth(),
-                            )
-                        }
-                    } else {
-                        BasicTextField(
-                            value = markupFieldValue,
-                            onValueChange = { newValue ->
-                                markupFieldValue = newValue
-                                onMarkupTextChange(newValue.text)
+                            if (textChanged) onMarkupTextChange(plain)
+                        },
+                        onTextLayout = { markupLayoutResult = it },
+                        textStyle = bodyStyle.copy(color = onSurfaceColor),
+                        cursorBrush = SolidColor(onSurfaceColor),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .onGloballyPositioned { markupFieldCoords = it }
+                            .onPreviewKeyEvent { event ->
+                                handleEditorKeys(event, markupFieldValue) { newValue ->
+                                    val changed = newValue.text != markupFieldValue.text
+                                    val ann = buildValidatedMarkupAnnotatedExact(
+                                        newValue.text,
+                                        validationResult,
+                                        onSurfaceColor,
+                                    )
+                                    markupFieldValue = TextFieldValue(
+                                        annotatedString = ann,
+                                        selection = newValue.selection,
+                                        composition = newValue.composition,
+                                    )
+                                    if (changed) onMarkupTextChange(newValue.text)
+                                }
                             },
-                            textStyle = bodyStyle.copy(color = onSurfaceColor),
-                            modifier = Modifier.fillMaxWidth(),
-                        )
-                    }
+                    )
                 }
             }
         }
@@ -996,95 +1149,225 @@ private fun androidx.compose.ui.text.AnnotatedString.Builder.appendInnerWithMark
     }
 }
 
-private fun buildValidatedMarkupAnnotatedString(
-    segments: List<TextSegment>,
-    validationResult: ValidationResult,
+/** Plain [AnnotatedString.text] equals [fullMarkup] exactly; walks raw string like [TextParser.parse]. */
+private fun buildValidatedMarkupAnnotatedExact(
+    fullMarkup: String,
+    result: ValidationResult?,
     onSurfaceColor: Color,
-): androidx.compose.ui.text.AnnotatedString {
+): AnnotatedString {
+    if (result == null) {
+        return AnnotatedString(fullMarkup)
+    }
+    val segments = TextParser.parse(fullMarkup)
     val extraBySeg = mutableMapOf<Int, MutableSet<Int>>()
-    for (p in validationResult.paragraphs) {
+    for (p in result.paragraphs) {
         for ((seg, set) in p.extraMarkupSignificantWordIndicesBySegment) {
             extraBySeg.getOrPut(seg) { mutableSetOf() }.addAll(set)
         }
     }
-    val unmatched = validationResult.unmatchedSegmentIndices
+    val unmatched = result.unmatchedSegmentIndices
     val extraHighlight = Color(0xFFFFB300).copy(alpha = 0.35f)
     val tagColor = onSurfaceColor.copy(alpha = 0.55f)
     return buildAnnotatedString {
-        segments.forEachIndexed { segIdx, seg ->
-            if (segIdx > 0) append("\n\n")
-            if (seg.voiceName != null) {
-                withStyle(SpanStyle(color = tagColor)) {
-                    append("[${seg.voiceName}]\n")
-                }
+        var segIdx = 0
+        var last = 0
+        for (match in TextParser.TAG_REGEX.findAll(fullMarkup)) {
+            val beforeRaw = fullMarkup.substring(last, match.range.first)
+            if (beforeRaw.trim().isNotBlank()) {
+                appendMarkupSegmentContent(
+                    this,
+                    beforeRaw,
+                    segIdx,
+                    segments,
+                    unmatched,
+                    extraBySeg,
+                    extraHighlight,
+                )
+                segIdx++
+            } else {
+                append(beforeRaw)
             }
-            when {
-                segIdx in unmatched -> {
-                    val nSig = TextParser.extractCompareWords(seg.text).size
-                    val allExtra = if (nSig > 0) (0 until nSig).toSet() else emptySet()
-                    appendInnerWithMarkupHighlights(seg.text, allExtra, extraHighlight)
-                }
-                else -> {
-                    appendInnerWithMarkupHighlights(
-                        seg.text,
-                        extraBySeg[segIdx].orEmpty(),
-                        extraHighlight,
-                    )
-                }
+
+            val innerRange = match.groups[2]!!.range
+            val openPart = fullMarkup.substring(match.range.first, innerRange.first)
+            val innerRaw = fullMarkup.substring(innerRange)
+            val closePart = fullMarkup.substring(innerRange.last + 1, match.range.last + 1)
+
+            if (innerRaw.trim().isNotBlank()) {
+                withStyle(SpanStyle(color = tagColor)) { append(openPart) }
+                appendMarkupSegmentContent(
+                    this,
+                    innerRaw,
+                    segIdx,
+                    segments,
+                    unmatched,
+                    extraBySeg,
+                    extraHighlight,
+                )
+                withStyle(SpanStyle(color = tagColor)) { append(closePart) }
+                segIdx++
+            } else {
+                append(openPart)
+                append(innerRaw)
+                append(closePart)
             }
-            if (seg.voiceName != null) {
-                append("\n")
-                withStyle(SpanStyle(color = tagColor)) {
-                    append("[/${seg.voiceName}]")
+
+            last = match.range.last + 1
+        }
+        val tailRaw = fullMarkup.substring(last)
+        if (tailRaw.trim().isNotBlank()) {
+            appendMarkupSegmentContent(
+                this,
+                tailRaw,
+                segIdx,
+                segments,
+                unmatched,
+                extraBySeg,
+                extraHighlight,
+            )
+        } else {
+            append(tailRaw)
+        }
+    }
+}
+
+private fun appendMarkupSegmentContent(
+    builder: androidx.compose.ui.text.AnnotatedString.Builder,
+    raw: String,
+    segIdx: Int,
+    segments: List<TextSegment>,
+    unmatched: Set<Int>,
+    extraBySeg: Map<Int, Set<Int>>,
+    extraHighlight: Color,
+) {
+    when {
+        segIdx in unmatched -> {
+            val nSig = TextParser.extractCompareWords(segments[segIdx].text).size
+            val allExtra = if (nSig > 0) (0 until nSig).toSet() else emptySet()
+            builder.appendInnerWithMarkupHighlights(raw, allExtra, extraHighlight)
+        }
+        else -> {
+            builder.appendInnerWithMarkupHighlights(
+                raw,
+                extraBySeg[segIdx].orEmpty(),
+                extraHighlight,
+            )
+        }
+    }
+}
+
+private val originalParagraphDelimiter = Regex("\n\\s*\n")
+
+/** Annotated string whose plain [AnnotatedString.text] equals [fullOriginal] exactly (cursor-safe editing). */
+private fun buildValidatedOriginalAnnotatedExact(
+    fullOriginal: String,
+    result: ValidationResult?,
+): AnnotatedString {
+    if (result == null || result.paragraphs.isEmpty()) {
+        return AnnotatedString(fullOriginal)
+    }
+    val mappings = result.paragraphs
+    val redBg = Color(0xFFEF5350).copy(alpha = 0.3f)
+    return buildAnnotatedString {
+        var mi = 0
+        var searchStart = 0
+        var match = originalParagraphDelimiter.find(fullOriginal, searchStart)
+        while (match != null) {
+            val paraRaw = fullOriginal.substring(searchStart, match.range.first)
+            appendOriginalParagraphChunk(this, paraRaw, mappings.getOrNull(mi), redBg)
+            if (paraRaw.trim().isNotBlank()) mi++
+            append(match.value)
+            searchStart = match.range.last + 1
+            match = originalParagraphDelimiter.find(fullOriginal, searchStart)
+        }
+        val tail = fullOriginal.substring(searchStart)
+        appendOriginalParagraphChunk(this, tail, mappings.getOrNull(mi), redBg)
+    }
+}
+
+private fun appendOriginalParagraphChunk(
+    builder: androidx.compose.ui.text.AnnotatedString.Builder,
+    paraRaw: String,
+    mapping: ParagraphMapping?,
+    redBg: Color,
+) {
+    if (mapping == null) {
+        builder.append(paraRaw)
+        return
+    }
+    if (paraRaw.trim().isBlank()) {
+        builder.append(paraRaw)
+        return
+    }
+    val leadEnd = paraRaw.indexOfFirst { !it.isWhitespace() }
+    val trailStart = paraRaw.indexOfLast { !it.isWhitespace() } + 1
+    if (leadEnd < 0) {
+        builder.append(paraRaw)
+        return
+    }
+    val lead = paraRaw.substring(0, leadEnd)
+    val trimmed = paraRaw.substring(leadEnd, trailStart)
+    val trail = paraRaw.substring(trailStart)
+    when {
+        mapping.isValid -> builder.append(paraRaw)
+        mapping.matchedSegmentIndices.isEmpty() -> {
+            builder.apply {
+                append(lead)
+                withStyle(SpanStyle(background = redBg)) { append(trimmed) }
+                append(trail)
+            }
+        }
+        else -> {
+            val ranges = TextParser.mapCompareTokenRangesInRawParagraph(trimmed)
+            val tokens = TextParser.splitCompareWhitespace(TextParser.stripMarkup(trimmed))
+            val missing = mapping.missingOriginalWordIndices
+            if (ranges == null || ranges.size != tokens.size) {
+                builder.append(paraRaw)
+            } else {
+                builder.apply {
+                    append(lead)
+                    var pos = 0
+                    ranges.forEachIndexed { di, r ->
+                        if (pos < r.first) append(trimmed.substring(pos, r.first))
+                        val chunk = trimmed.substring(r.first, r.last + 1)
+                        if (di in missing) {
+                            withStyle(SpanStyle(background = redBg)) { append(chunk) }
+                        } else {
+                            append(chunk)
+                        }
+                        pos = r.last + 1
+                    }
+                    if (pos < trimmed.length) append(trimmed.substring(pos))
+                    append(trail)
                 }
             }
         }
     }
 }
 
-private fun buildValidatedOriginalAnnotatedString(
-    result: ValidationResult,
+@Composable
+private fun UnmatchedOriginalFooter(
+    validationResult: ValidationResult?,
     segments: List<TextSegment>,
-): androidx.compose.ui.text.AnnotatedString {
-    return buildAnnotatedString {
-        result.paragraphs.forEachIndexed { idx, mapping ->
-            if (idx > 0) append("\n\n")
-            if (mapping.isValid) {
-                append(TextParser.stripMarkup(mapping.originalParagraph))
-            } else if (mapping.matchedSegmentIndices.isEmpty()) {
-                // Entire paragraph is missing in markup — highlight all in red
-                withStyle(SpanStyle(background = Color(0xFFEF5350).copy(alpha = 0.3f))) {
-                    append(TextParser.stripMarkup(mapping.originalParagraph))
-                }
-            } else {
-                // Partial match — missing significant tokens on original (red); extras shown on markup side
-                val strippedOrig = TextParser.stripMarkup(mapping.originalParagraph)
-                val origWords = TextParser.splitCompareWhitespace(strippedOrig)
-                origWords.forEachIndexed { i, word ->
-                    if (i > 0) append(" ")
-                    if (i in mapping.missingOriginalWordIndices) {
-                        withStyle(SpanStyle(background = Color(0xFFEF5350).copy(alpha = 0.3f))) {
-                            append(word)
-                        }
-                    } else {
-                        append(word)
-                    }
-                }
-            }
-        }
-        // Show unmatched segments
-        if (result.unmatchedSegmentIndices.isNotEmpty()) {
-            val unmatchedText = result.unmatchedSegmentIndices
-                .sorted()
-                .mapNotNull { segments.getOrNull(it) }
-                .joinToString(" ") { it.text }
-            val preview = TextParser.stripMarkup(unmatchedText).take(100)
-            append("\n\n")
+    labelStyle: androidx.compose.ui.text.TextStyle,
+) {
+    val unmatched = validationResult?.unmatchedSegmentIndices.orEmpty()
+    if (unmatched.isEmpty()) return
+    val unmatchedText = unmatched
+        .sorted()
+        .mapNotNull { segments.getOrNull(it) }
+        .joinToString(" ") { it.text }
+    val preview = TextParser.stripMarkup(unmatchedText).take(100)
+    val onSurface = MaterialTheme.colorScheme.onSurface
+    Text(
+        text = buildAnnotatedString {
             withStyle(SpanStyle(background = Color(0xFFFFB300).copy(alpha = 0.3f))) {
                 append("[Лишнее в разметке: $preview...]")
             }
-        }
-    }
+        },
+        style = labelStyle.copy(color = onSurface),
+        modifier = Modifier.padding(top = 8.dp),
+    )
 }
 
 // ── Diff annotation utilities ─────────────────────────────────────────────────

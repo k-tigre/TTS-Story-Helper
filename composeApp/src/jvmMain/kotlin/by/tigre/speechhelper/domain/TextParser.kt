@@ -30,7 +30,8 @@ data class ValidationResult(
 
 object TextParser {
 
-    private val TAG_REGEX = Regex("""\[([^]/]+)](.*?)\[/\1]""", RegexOption.DOT_MATCHES_ALL)
+    /** Same pattern as [parse]; exposed so UI can walk raw markup in lockstep with parsed segments. */
+    internal val TAG_REGEX = Regex("""\[([^]/]+)](.*?)\[/\1]""", RegexOption.DOT_MATCHES_ALL)
 
     /**
      * Word boundaries for comparison: Unicode separators (\p{Z}) **and** line breaks (\R),
@@ -114,6 +115,26 @@ object TextParser {
         var result = TAG_REGEX.replace(text) { it.groupValues[2] }
         result = PAUSE_REGEX.replace(result, "")
         return result.replace(UNICODE_SPACE_SPLIT, " ").trim()
+    }
+
+    /**
+     * For each token from [splitCompareWhitespace]([stripMarkup](paragraph)), finds that token in
+     * [paragraph] via left-to-right [String.indexOf], so validation word indices map to raw editor ranges.
+     * Returns null if any token is missing (editor text and validation out of sync).
+     */
+    fun mapCompareTokenRangesInRawParagraph(paragraph: String): List<IntRange>? {
+        val strippedForTok = stripMarkup(paragraph)
+        val tokens = splitCompareWhitespace(strippedForTok)
+        if (tokens.isEmpty()) return emptyList()
+        val ranges = mutableListOf<IntRange>()
+        var searchFrom = 0
+        for (tok in tokens) {
+            val idx = paragraph.indexOf(tok, searchFrom)
+            if (idx < 0) return null
+            ranges.add(idx until idx + tok.length)
+            searchFrom = idx + tok.length
+        }
+        return ranges
     }
 
     // ── LCS utilities ────────────────────────────────────────────────────────
