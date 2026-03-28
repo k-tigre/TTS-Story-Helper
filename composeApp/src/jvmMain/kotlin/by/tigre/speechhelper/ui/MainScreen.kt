@@ -206,12 +206,28 @@ fun MainScreen() {
 
     if (vm.showFolderIdDialog) {
         FolderIdDialog(
-            onDismiss = { vm.showFolderIdDialog = false },
-            onSave = { folderId ->
-                TokenStorage.folderId = folderId
-                vm.showFolderIdDialog = false
-                vm.launchAutoMarkup()
+            onDismiss = { vm.dismissFolderIdDialog() },
+            onSave = { folderId -> vm.onFolderIdSaved(folderId) },
+        )
+    }
+
+    if (vm.showChaptersWorkflowDialog) {
+        ChaptersWorkflowDialog(
+            chapters = vm.chapters,
+            currentChapterId = vm.currentChapterId,
+            isLoading = vm.isLoading,
+            onDismiss = { vm.showChaptersWorkflowDialog = false },
+            onLaunchBatchMarkup = { ids ->
+                if (!TokenStorage.hasCredentials()) {
+                    showTokenDialog = true
+                } else {
+                    vm.launchAutoMarkupForChapters(ids)
+                    vm.showChaptersWorkflowDialog = false
+                }
             },
+            onSetMarkupDone = { id, done -> vm.setChapterMarkupDoneFlag(id, done) },
+            onSetVoiceDone = { id, done -> vm.setChapterVoiceDoneFlag(id, done) },
+            audioExists = { vm.audioFileExistsForChapter(it) },
         )
     }
 
@@ -258,14 +274,22 @@ fun MainScreen() {
         topBar = {
             TopAppBar(
                 title = {
-                    ChapterSelector(
-                        chapters = vm.chapters,
-                        currentChapterId = vm.currentChapterId,
-                        onSelectChapter = { vm.switchToChapter(it) },
-                        onCreateChapter = { vm.showCreateDialog = true },
-                        onRenameChapter = { vm.showRenameDialog = true },
-                        onDeleteChapter = { vm.showDeleteDialog = true },
-                    )
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        ChapterSelector(
+                            chapters = vm.chapters,
+                            currentChapterId = vm.currentChapterId,
+                            onSelectChapter = { vm.switchToChapter(it) },
+                            onCreateChapter = { vm.showCreateDialog = true },
+                            onRenameChapter = { vm.showRenameDialog = true },
+                            onDeleteChapter = { vm.showDeleteDialog = true },
+                        )
+                        TextButton(onClick = { vm.showChaptersWorkflowDialog = true }) {
+                            Text("Пакетная обработка…")
+                        }
+                    }
                 },
                 actions = {
                     TextButton(onClick = { vm.saveCurrentBook() }) {
@@ -552,6 +576,21 @@ fun MainScreen() {
                     enabled = vm.text.isNotBlank() && !vm.isLoading && !vm.markupModeEnabled,
                 ) {
                     Text("Авто-разметка")
+                }
+
+                val currentChapterInfo = vm.chapters.find { it.id == vm.currentChapterId }
+                if (currentChapterInfo != null) {
+                    FilterChip(
+                        selected = currentChapterInfo.markupDone,
+                        onClick = { vm.toggleCurrentChapterMarkupDone() },
+                        label = { Text("Разметка готова") },
+                    )
+                    FilterChip(
+                        selected = currentChapterInfo.voiceDone,
+                        onClick = { vm.toggleCurrentChapterVoiceDone() },
+                        enabled = vm.audioFileExistsForChapter(vm.currentChapterId),
+                        label = { Text("Озвучка готова") },
+                    )
                 }
 
                 if (vm.markupModeEnabled) {

@@ -1,6 +1,13 @@
 package by.tigre.speechhelper.domain
 
-data class ChapterInfo(val id: String, val name: String)
+data class ChapterInfo(
+    val id: String,
+    val name: String,
+    /** Пользователь отметил, что правка разметки завершена */
+    val markupDone: Boolean = false,
+    /** Пользователь отметил, что озвучка принята (есть файл) */
+    val voiceDone: Boolean = false,
+)
 
 
 data class VoiceInfo(val id: String, val gender: String, val roles: List<String>)

@@ -98,6 +98,9 @@ class MainViewModel(private val scope: CoroutineScope) {
     var showFolderIdDialog by mutableStateOf(false)
     var showResetMarkupDialog by mutableStateOf(false)
     var showHelpDialog by mutableStateOf(false)
+    var showChaptersWorkflowDialog by mutableStateOf(false)
+
+    private var pendingMarkupChapterIds: List<String>? = null
 
     val hasMarkers: Boolean get() = TextParser.hasVoiceMarkers(text)
     val detectedVoices: Set<String> get() = if (hasMarkers) TextParser.extractVoiceNames(text) else emptySet()
@@ -179,6 +182,7 @@ class MainViewModel(private val scope: CoroutineScope) {
         markupModeEnabled = originalText.isNotBlank() && hasMarkers
         ensureVoiceMain()
         revalidate()
+        chapters = SessionStorage.listChapters()
     }
 
     fun createChapter(name: String) {
@@ -341,6 +345,49 @@ class MainViewModel(private val scope: CoroutineScope) {
 
     fun saveVoiceMapping() {
         SessionStorage.voiceMapping = voiceMapping.toMap()
+    }
+
+    fun refreshChapters() {
+        chapters = SessionStorage.listChapters()
+    }
+
+    fun audioFileExistsForChapter(id: String): Boolean {
+        val p = SessionStorage.getChapterAudioPath(id) ?: return false
+        return File(p).isFile
+    }
+
+    fun setChapterMarkupDoneFlag(id: String, done: Boolean) {
+        SessionStorage.setChapterMarkupDone(id, done)
+        refreshChapters()
+    }
+
+    fun setChapterVoiceDoneFlag(id: String, done: Boolean) {
+        SessionStorage.setChapterVoiceDone(id, done)
+        refreshChapters()
+    }
+
+    fun toggleCurrentChapterMarkupDone() {
+        val ch = chapters.find { it.id == currentChapterId } ?: return
+        setChapterMarkupDoneFlag(currentChapterId, !ch.markupDone)
+    }
+
+    fun toggleCurrentChapterVoiceDone() {
+        if (!audioFileExistsForChapter(currentChapterId)) return
+        val ch = chapters.find { it.id == currentChapterId } ?: return
+        setChapterVoiceDoneFlag(currentChapterId, !ch.voiceDone)
+    }
+
+    fun dismissFolderIdDialog() {
+        showFolderIdDialog = false
+        pendingMarkupChapterIds = null
+    }
+
+    fun onFolderIdSaved(folderId: String) {
+        TokenStorage.folderId = folderId
+        showFolderIdDialog = false
+        val ids = pendingMarkupChapterIds ?: listOf(currentChapterId)
+        pendingMarkupChapterIds = null
+        executeAutoMarkupForChapters(ids)
     }
 
     fun ensureVoiceMappings(voices: Set<String>) {
@@ -609,35 +656,70 @@ class MainViewModel(private val scope: CoroutineScope) {
     // ── Auto-markup ───────────────────────────────────────────────────────────
 
     fun launchAutoMarkup() {
-        val folderId = TokenStorage.folderId
-        if (folderId.isBlank()) {
+        launchAutoMarkupForChapters(listOf(currentChapterId))
+    }
+
+    fun launchAutoMarkupForChapters(chapterIds: List<String>) {
+        val distinct = chapterIds.distinct().filter { id ->
+            SessionStorage.getChapterText(id).isNotBlank()
+        }
+        if (distinct.isEmpty() || isLoading) return
+        if (TokenStorage.folderId.isBlank()) {
+            pendingMarkupChapterIds = distinct
             showFolderIdDialog = true
             return
         }
-        if (text.isBlank() || isLoading) return
+        executeAutoMarkupForChapters(distinct)
+    }
+
+    private fun executeAutoMarkupForChapters(chapterIds: List<String>) {
+        if (chapterIds.isEmpty() || isLoading) return
         isLoading = true
         progressMessage = "Авто-разметка..."
         statusMessage = ""
         scope.launch {
             try {
-                AiMarkupApi.autoMarkup(
-                    text = text,
-                    token = TokenStorage.iamToken,
-                    folderId = folderId,
-                    existingVoices = voiceMapping.keys.toSet(),
-                ).collectLatest { result ->
-                    when (result) {
-                        is MarkupResult.InProgress -> progressMessage = result.message
-                        is MarkupResult.Done -> {
-                            originalText = text
-                            SessionStorage.setOriginalText(currentChapterId, text)
-                            text = result.text
-                            saveCurrentChapter()
-                            markupModeEnabled = true
-                            revalidate()
-                            statusMessage = "Авто-разметка завершена"
+                saveCurrentChapter()
+                val errors = mutableListOf<String>()
+                val folderId = TokenStorage.folderId
+                for ((index, id) in chapterIds.withIndex()) {
+                    val raw = SessionStorage.getChapterText(id)
+                    if (raw.isBlank()) continue
+                    try {
+                        AiMarkupApi.autoMarkup(
+                            text = raw,
+                            token = TokenStorage.iamToken,
+                            folderId = folderId,
+                            existingVoices = voiceMapping.keys.toSet(),
+                        ).collectLatest { result ->
+                            when (result) {
+                                is MarkupResult.InProgress ->
+                                    progressMessage =
+                                        "Авто-разметка ${index + 1} из ${chapterIds.size}\n${result.message}"
+                                is MarkupResult.Done -> {
+                                    SessionStorage.setOriginalText(id, raw)
+                                    SessionStorage.setChapterText(id, result.text)
+                                    if (id == currentChapterId) {
+                                        originalText = raw
+                                        text = result.text
+                                        markupModeEnabled = true
+                                        revalidate()
+                                    }
+                                }
+                            }
                         }
+                    } catch (e: Exception) {
+                        val label = chapters.find { it.id == id }?.name ?: id
+                        errors.add("$label: ${e.message}")
+                        e.printStackTrace()
                     }
+                }
+                refreshChapters()
+                statusMessage = when {
+                    errors.isEmpty() ->
+                        "Авто-разметка: готово (${chapterIds.size} ${chapterWord(chapterIds.size)})"
+                    else ->
+                        "Авто-разметка: есть ошибки (${errors.size})\n${errors.joinToString("\n")}"
                 }
             } catch (e: Exception) {
                 statusMessage = "Ошибка авто-разметки: ${e.message}"
@@ -648,6 +730,13 @@ class MainViewModel(private val scope: CoroutineScope) {
             }
         }
     }
+
+    private fun chapterWord(n: Int): String =
+        when {
+            n % 10 == 1 && n % 100 != 11 -> "глава"
+            n % 10 in 2..4 && n % 100 !in 12..14 -> "главы"
+            else -> "глав"
+        }
 
     fun remarkupSegment(index: Int) {
         val folderId = TokenStorage.folderId

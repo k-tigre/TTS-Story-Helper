@@ -102,8 +102,46 @@ object SessionStorage {
         val dirs = chaptersDir.listFiles()?.filter { it.isDirectory }?.sortedBy { it.name } ?: emptyList()
         return dirs.map { d ->
             val name = File(d, "meta.txt").takeIf { it.exists() }?.readText()?.trim() ?: d.name
-            ChapterInfo(d.name, name)
+            val (markupDone, voiceDone) = readChapterWorkflowFlags(d.name)
+            ChapterInfo(d.name, name, markupDone, voiceDone)
         }
+    }
+
+    private fun workflowFile(id: String) = File(chapterDir(id), "workflow.txt")
+
+    private fun readChapterWorkflowFlags(id: String): Pair<Boolean, Boolean> {
+        val f = workflowFile(id)
+        if (!f.exists()) return false to false
+        var markupDone = false
+        var voiceDone = false
+        for (line in f.readLines()) {
+            val idx = line.indexOf('=')
+            if (idx <= 0) continue
+            val key = line.take(idx).trim()
+            val value = line.substring(idx + 1).trim()
+            val truthy = value == "1" || value.equals("true", ignoreCase = true)
+            when (key) {
+                "markup_done" -> markupDone = truthy
+                "voice_done" -> voiceDone = truthy
+            }
+        }
+        return markupDone to voiceDone
+    }
+
+    private fun writeChapterWorkflowFlags(id: String, markupDone: Boolean, voiceDone: Boolean) {
+        workflowFile(id).writeText(
+            "markup_done=${if (markupDone) 1 else 0}\nvoice_done=${if (voiceDone) 1 else 0}\n",
+        )
+    }
+
+    fun setChapterMarkupDone(id: String, done: Boolean) {
+        val (_, v) = readChapterWorkflowFlags(id)
+        writeChapterWorkflowFlags(id, done, v)
+    }
+
+    fun setChapterVoiceDone(id: String, done: Boolean) {
+        val (m, _) = readChapterWorkflowFlags(id)
+        writeChapterWorkflowFlags(id, m, done)
     }
 
     fun createChapter(name: String): String {

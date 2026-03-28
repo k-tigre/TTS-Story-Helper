@@ -6,8 +6,11 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.ClickableText
@@ -15,7 +18,9 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
@@ -29,6 +34,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import by.tigre.speechhelper.domain.ChapterInfo
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
@@ -357,6 +363,101 @@ fun SplitSegmentDialog(
             }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Отмена") } },
+    )
+}
+
+@Composable
+fun ChaptersWorkflowDialog(
+    chapters: List<ChapterInfo>,
+    currentChapterId: String,
+    isLoading: Boolean,
+    onDismiss: () -> Unit,
+    onLaunchBatchMarkup: (List<String>) -> Unit,
+    onSetMarkupDone: (String, Boolean) -> Unit,
+    onSetVoiceDone: (String, Boolean) -> Unit,
+    audioExists: (String) -> Boolean,
+) {
+    var selectedIds by remember { mutableStateOf(setOf<String>()) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Пакетная обработка: разметка и озвучка") },
+        text = {
+            Column(modifier = Modifier.heightIn(max = 420.dp)) {
+                Text(
+                    "Отметьте галочками главы для пакетной авто-разметки. " +
+                        "Чипы «Разметка» и «Озвучка» — ваши ручные отметки прогресса.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(Modifier.height(8.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    TextButton(
+                        onClick = { selectedIds = chapters.map { it.id }.toSet() },
+                    ) {
+                        Text("Выбрать все")
+                    }
+                    TextButton(onClick = { selectedIds = emptySet() }) {
+                        Text("Снять выбор")
+                    }
+                }
+                LazyColumn(
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier.heightIn(max = 320.dp),
+                ) {
+                    items(chapters, key = { it.id }) { ch ->
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
+                            Checkbox(
+                                checked = ch.id in selectedIds,
+                                onCheckedChange = {
+                                    selectedIds =
+                                        if (ch.id in selectedIds) selectedIds - ch.id else selectedIds + ch.id
+                                },
+                            )
+                            Column(Modifier.weight(1f)) {
+                                Text(
+                                    ch.name,
+                                    fontWeight = if (ch.id == currentChapterId) FontWeight.Bold else null,
+                                    style = MaterialTheme.typography.bodyMedium,
+                                )
+                                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                    FilterChip(
+                                        selected = ch.markupDone,
+                                        onClick = { onSetMarkupDone(ch.id, !ch.markupDone) },
+                                        label = { Text("Разметка") },
+                                    )
+                                    FilterChip(
+                                        selected = ch.voiceDone,
+                                        onClick = {
+                                            if (audioExists(ch.id)) {
+                                                onSetVoiceDone(ch.id, !ch.voiceDone)
+                                            }
+                                        },
+                                        enabled = audioExists(ch.id),
+                                        label = { Text("Озвучка") },
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = { onLaunchBatchMarkup(selectedIds.toList()) },
+                enabled = selectedIds.isNotEmpty() && !isLoading,
+            ) {
+                Text("Авто-разметка выбранных")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Закрыть") }
+        },
     )
 }
 

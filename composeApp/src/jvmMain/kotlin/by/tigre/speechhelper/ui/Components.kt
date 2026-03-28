@@ -50,10 +50,23 @@ fun ChapterSelector(
                 chapters.forEach { chapter ->
                     DropdownMenuItem(
                         text = {
-                            Text(
-                                text = chapter.name,
-                                fontWeight = if (chapter.id == currentChapterId) FontWeight.Bold else null,
-                            )
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text(
+                                    text = chapter.name,
+                                    fontWeight = if (chapter.id == currentChapterId) FontWeight.Bold else null,
+                                )
+                                if (chapter.markupDone || chapter.voiceDone) {
+                                    Text(
+                                        text = buildString {
+                                            append(" · ")
+                                            if (chapter.markupDone) append("Р")
+                                            if (chapter.voiceDone) append("О")
+                                        },
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.primary,
+                                    )
+                                }
+                            }
                         },
                         onClick = {
                             onSelectChapter(chapter.id)
