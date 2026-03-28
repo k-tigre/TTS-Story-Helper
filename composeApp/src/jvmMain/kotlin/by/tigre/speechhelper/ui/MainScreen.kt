@@ -24,6 +24,7 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -47,6 +48,7 @@ import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
@@ -60,6 +62,8 @@ import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.unit.dp
 import by.tigre.speechhelper.TokenStorage
 import by.tigre.speechhelper.data.SessionStorage
+import by.tigre.speechhelper.domain.LOCAL_TTS_SAMPLE_RATES
+import by.tigre.speechhelper.domain.SynthesisBackend
 import by.tigre.speechhelper.domain.TextParser
 import by.tigre.speechhelper.domain.TextSegment
 import by.tigre.speechhelper.domain.ValidationResult
@@ -393,6 +397,7 @@ fun MainScreen() {
                     SegmentsView(
                         segments = vm.segments,
                         voiceMapping = vm.voiceMapping,
+                        synthesizeAudio = { t, s -> vm.synthesizeAudio(t, s, "wav") },
                         onSegmentTextChange = { index, newText ->
                             vm.segments[index] = vm.segments[index].copy(text = newText)
                         },
@@ -420,6 +425,7 @@ fun MainScreen() {
                 }
                 val activeVoiceNames = if (vm.markupModeEnabled) vm.detectedVoices else setOf("voice_main")
                 VoiceMappingPanel(
+                    synthesisBackend = vm.synthesisBackend,
                     voiceNames = allVoiceNames,
                     activeVoiceNames = activeVoiceNames,
                     mapping = vm.voiceMapping,
@@ -439,6 +445,78 @@ fun MainScreen() {
                 )
             }
 
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Text("Источник синтеза", style = MaterialTheme.typography.labelMedium)
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    FilterChip(
+                        selected = vm.synthesisBackend == SynthesisBackend.Cloud,
+                        onClick = { vm.onSynthesisBackendChange(SynthesisBackend.Cloud) },
+                        label = { Text("Yandex SpeechKit") },
+                    )
+                    FilterChip(
+                        selected = vm.synthesisBackend == SynthesisBackend.Local,
+                        onClick = { vm.onSynthesisBackendChange(SynthesisBackend.Local) },
+                        label = { Text("Локально (Silero)") },
+                    )
+                }
+                if (vm.synthesisBackend == SynthesisBackend.Local) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        OutlinedTextField(
+                            value = vm.localTtsSettings.baseUrl,
+                            onValueChange = {
+                                vm.onLocalTtsSettingsChange(vm.localTtsSettings.copy(baseUrl = it))
+                            },
+                            label = { Text("URL сервера") },
+                            singleLine = true,
+                            modifier = Modifier.weight(1f),
+                        )
+                        OutlinedButton(onClick = { vm.checkLocalTtsConnection() }) {
+                            Text("Проверить")
+                        }
+                    }
+                    OutlinedTextField(
+                        value = vm.localTtsSettings.modelId,
+                        onValueChange = {
+                            vm.onLocalTtsSettingsChange(vm.localTtsSettings.copy(modelId = it))
+                        },
+                        label = { Text("ID модели Silero (например v5_ru)") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        Text("Частота:", style = MaterialTheme.typography.bodySmall)
+                        DropdownSelector(
+                            label = "",
+                            items = LOCAL_TTS_SAMPLE_RATES.map { it.toString() },
+                            selected = vm.localTtsSettings.sampleRate.toString(),
+                            onSelect = { rate ->
+                                rate.toIntOrNull()?.let {
+                                    vm.onLocalTtsSettingsChange(vm.localTtsSettings.copy(sampleRate = it))
+                                }
+                            },
+                        )
+                    }
+                    Text(
+                        "Формат: WAV. Скорость/тембр — через SSML prosody (ступенчато, не как в облаке). Сервер: local-tts-server/run.ps1 или run.sh",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+
             // Action buttons
             Row(
                 verticalAlignment = Alignment.CenterVertically,
@@ -446,7 +524,7 @@ fun MainScreen() {
             ) {
                 Button(
                     onClick = {
-                        if (!TokenStorage.hasCredentials()) {
+                        if (vm.synthesisBackend == SynthesisBackend.Cloud && !TokenStorage.hasCredentials()) {
                             showTokenDialog = true
                             return@Button
                         }
@@ -479,7 +557,7 @@ fun MainScreen() {
                 if (vm.markupModeEnabled) {
                     OutlinedButton(
                         onClick = {
-                            if (!TokenStorage.hasCredentials()) {
+                            if (vm.synthesisBackend == SynthesisBackend.Cloud && !TokenStorage.hasCredentials()) {
                                 showTokenDialog = true
                                 return@OutlinedButton
                             }
@@ -732,15 +810,35 @@ private fun MarkupSplitView(
                         .padding(8.dp),
                 ) {
                     Box(modifier = Modifier.fillMaxSize().verticalScroll(leftScrollState)) {
-                        BasicTextField(
-                            value = originalFieldValue,
-                            onValueChange = { newValue ->
-                                originalFieldValue = newValue
-                                onOriginalTextChange(newValue.text)
-                            },
-                            textStyle = bodyStyle.copy(color = onSurfaceColor),
-                            modifier = Modifier.fillMaxWidth(),
-                        )
+                        if (validationResult != null) {
+                            Box(modifier = Modifier.fillMaxWidth()) {
+                                Text(
+                                    text = buildValidatedOriginalAnnotatedString(validationResult, segments),
+                                    style = bodyStyle.copy(color = onSurfaceColor),
+                                    modifier = Modifier.fillMaxWidth(),
+                                )
+                                BasicTextField(
+                                    value = originalFieldValue,
+                                    onValueChange = { newValue ->
+                                        originalFieldValue = newValue
+                                        onOriginalTextChange(newValue.text)
+                                    },
+                                    textStyle = bodyStyle.copy(color = Color.Transparent),
+                                    cursorBrush = SolidColor(onSurfaceColor),
+                                    modifier = Modifier.fillMaxWidth(),
+                                )
+                            }
+                        } else {
+                            BasicTextField(
+                                value = originalFieldValue,
+                                onValueChange = { newValue ->
+                                    originalFieldValue = newValue
+                                    onOriginalTextChange(newValue.text)
+                                },
+                                textStyle = bodyStyle.copy(color = onSurfaceColor),
+                                modifier = Modifier.fillMaxWidth(),
+                            )
+                        }
                     }
                 }
             } else {
@@ -753,7 +851,7 @@ private fun MarkupSplitView(
                     Box(modifier = Modifier.fillMaxSize().verticalScroll(leftScrollState)) {
                         if (validationResult != null) {
                             Text(
-                                text = buildValidatedOriginalAnnotatedString(validationResult, segments, bodyStyle),
+                                text = buildValidatedOriginalAnnotatedString(validationResult, segments),
                                 style = bodyStyle.copy(color = onSurfaceColor),
                             )
                         } else {
@@ -768,23 +866,50 @@ private fun MarkupSplitView(
 
             VerticalDivider()
 
-            // Right: raw markup text (editable)
+            // Right: markup — highlights under transparent field while editing
             Box(
                 modifier = Modifier
                     .weight(1f)
                     .fillMaxHeight()
                     .padding(8.dp),
             ) {
+                val markupDisplaySegments = remember(markupFieldValue.text) {
+                    TextParser.parse(markupFieldValue.text)
+                }
                 Box(modifier = Modifier.fillMaxSize().verticalScroll(rightScrollState)) {
-                    BasicTextField(
-                        value = markupFieldValue,
-                        onValueChange = { newValue ->
-                            markupFieldValue = newValue
-                            onMarkupTextChange(newValue.text)
-                        },
-                        textStyle = bodyStyle.copy(color = onSurfaceColor),
-                        modifier = Modifier.fillMaxWidth(),
-                    )
+                    if (validationResult != null) {
+                        Box(modifier = Modifier.fillMaxWidth()) {
+                            Text(
+                                text = buildValidatedMarkupAnnotatedString(
+                                    markupDisplaySegments,
+                                    validationResult,
+                                    onSurfaceColor,
+                                ),
+                                style = bodyStyle.copy(color = onSurfaceColor),
+                                modifier = Modifier.fillMaxWidth(),
+                            )
+                            BasicTextField(
+                                value = markupFieldValue,
+                                onValueChange = { newValue ->
+                                    markupFieldValue = newValue
+                                    onMarkupTextChange(newValue.text)
+                                },
+                                textStyle = bodyStyle.copy(color = Color.Transparent),
+                                cursorBrush = SolidColor(onSurfaceColor),
+                                modifier = Modifier.fillMaxWidth(),
+                            )
+                        }
+                    } else {
+                        BasicTextField(
+                            value = markupFieldValue,
+                            onValueChange = { newValue ->
+                                markupFieldValue = newValue
+                                onMarkupTextChange(newValue.text)
+                            },
+                            textStyle = bodyStyle.copy(color = onSurfaceColor),
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                    }
                 }
             }
         }
@@ -793,10 +918,94 @@ private fun MarkupSplitView(
 
 // ── Paragraph validation annotation ──────────────────────────────────────────
 
+private fun androidx.compose.ui.text.AnnotatedString.Builder.appendInnerWithMarkupHighlights(
+    inner: String,
+    extraSigIndices: Set<Int>,
+    highlight: Color,
+) {
+    val pauseRe = Regex("""<\[[^\]]*\]>""")
+    var sigIdx = 0
+    var i = 0
+    while (i < inner.length) {
+        if (inner[i].isWhitespace()) {
+            append(inner[i])
+            i++
+            continue
+        }
+        val pauseMatch = pauseRe.find(inner, i)
+        if (pauseMatch != null && pauseMatch.range.first == i) {
+            append(pauseMatch.value)
+            i = pauseMatch.range.last + 1
+            continue
+        }
+        val start = i
+        while (i < inner.length && !inner[i].isWhitespace()) {
+            val pm = pauseRe.find(inner, i)
+            if (pm != null && pm.range.first == i) break
+            i++
+        }
+        val word = inner.substring(start, i)
+        if (word.isEmpty()) continue
+        val n = TextParser.normalizeCompareToken(word)
+        val isExtra = n.isNotEmpty() && sigIdx in extraSigIndices
+        if (n.isNotEmpty()) sigIdx++
+        if (isExtra) {
+            withStyle(SpanStyle(background = highlight)) { append(word) }
+        } else {
+            append(word)
+        }
+    }
+}
+
+private fun buildValidatedMarkupAnnotatedString(
+    segments: List<TextSegment>,
+    validationResult: ValidationResult,
+    onSurfaceColor: Color,
+): androidx.compose.ui.text.AnnotatedString {
+    val extraBySeg = mutableMapOf<Int, MutableSet<Int>>()
+    for (p in validationResult.paragraphs) {
+        for ((seg, set) in p.extraMarkupSignificantWordIndicesBySegment) {
+            extraBySeg.getOrPut(seg) { mutableSetOf() }.addAll(set)
+        }
+    }
+    val unmatched = validationResult.unmatchedSegmentIndices
+    val extraHighlight = Color(0xFFFFB300).copy(alpha = 0.35f)
+    val tagColor = onSurfaceColor.copy(alpha = 0.55f)
+    return buildAnnotatedString {
+        segments.forEachIndexed { segIdx, seg ->
+            if (segIdx > 0) append("\n\n")
+            if (seg.voiceName != null) {
+                withStyle(SpanStyle(color = tagColor)) {
+                    append("[${seg.voiceName}]\n")
+                }
+            }
+            when {
+                segIdx in unmatched -> {
+                    val nSig = TextParser.extractCompareWords(seg.text).size
+                    val allExtra = if (nSig > 0) (0 until nSig).toSet() else emptySet()
+                    appendInnerWithMarkupHighlights(seg.text, allExtra, extraHighlight)
+                }
+                else -> {
+                    appendInnerWithMarkupHighlights(
+                        seg.text,
+                        extraBySeg[segIdx].orEmpty(),
+                        extraHighlight,
+                    )
+                }
+            }
+            if (seg.voiceName != null) {
+                append("\n")
+                withStyle(SpanStyle(color = tagColor)) {
+                    append("[/${seg.voiceName}]")
+                }
+            }
+        }
+    }
+}
+
 private fun buildValidatedOriginalAnnotatedString(
     result: ValidationResult,
     segments: List<TextSegment>,
-    bodyStyle: androidx.compose.ui.text.TextStyle,
 ): androidx.compose.ui.text.AnnotatedString {
     return buildAnnotatedString {
         result.paragraphs.forEachIndexed { idx, mapping ->
@@ -809,34 +1018,17 @@ private fun buildValidatedOriginalAnnotatedString(
                     append(TextParser.stripMarkup(mapping.originalParagraph))
                 }
             } else {
-                // Partial match — highlight missing words in red
+                // Partial match — missing significant tokens on original (red); extras shown on markup side
                 val strippedOrig = TextParser.stripMarkup(mapping.originalParagraph)
-                val origWords = strippedOrig.split(Regex("\\s+")).filter { it.isNotBlank() }
-                val segmentText = mapping.matchedSegmentIndices
-                    .mapNotNull { segments.getOrNull(it) }
-                    .joinToString(" ") { it.text }
-                val markupWords = TextParser.extractCompareWords(segmentText)
-                val matchedIndices = TextParser.lcsIndicesA(
-                    origWords.map { it.lowercase() },
-                    markupWords,
-                )
+                val origWords = TextParser.splitCompareWhitespace(strippedOrig)
                 origWords.forEachIndexed { i, word ->
                     if (i > 0) append(" ")
-                    if (i !in matchedIndices) {
+                    if (i in mapping.missingOriginalWordIndices) {
                         withStyle(SpanStyle(background = Color(0xFFEF5350).copy(alpha = 0.3f))) {
                             append(word)
                         }
                     } else {
                         append(word)
-                    }
-                }
-                if (mapping.extraInMarkup.isNotEmpty()) {
-                    append(" ")
-                    withStyle(SpanStyle(
-                        background = Color(0xFFFFB300).copy(alpha = 0.3f),
-                        fontSize = bodyStyle.fontSize * 0.85,
-                    )) {
-                        append("[+${mapping.extraInMarkup.joinToString(" ")}]")
                     }
                 }
             }

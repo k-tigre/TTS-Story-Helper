@@ -35,7 +35,7 @@ object SpeechKitApi {
         format: String,
         token: String,
     ): Flow<SynthesisResult> = flow {
-        val chunks = splitText(text)
+        val chunks = SynthesisChunking.splitText(text, CHUNK_LIMIT)
 
         if (chunks.size == 1) {
             emit(SynthesisResult.InProgress("Синтез речи..."))
@@ -109,47 +109,6 @@ object SpeechKitApi {
         }
 
         return output.toByteArray()
-    }
-
-    internal fun splitText(text: String): List<String> {
-        if (text.length <= CHUNK_LIMIT) return listOf(text)
-
-        val chunks = mutableListOf<String>()
-        val sentences = text.split(Regex("""(?<=[.!?;])\s+"""))
-        val current = StringBuilder()
-
-        for (sentence in sentences) {
-            if (sentence.length > CHUNK_LIMIT) {
-                // Flush current buffer
-                if (current.isNotBlank()) {
-                    chunks.add(current.toString().trim())
-                    current.clear()
-                }
-                // Split long sentence by commas
-                val parts = sentence.split(Regex("""(?<=,)\s*"""))
-                for (part in parts) {
-                    if (current.length + part.length + 1 > CHUNK_LIMIT && current.isNotBlank()) {
-                        chunks.add(current.toString().trim())
-                        current.clear()
-                    }
-                    if (current.isNotEmpty()) current.append(" ")
-                    current.append(part)
-                }
-            } else if (current.length + sentence.length + 1 > CHUNK_LIMIT) {
-                chunks.add(current.toString().trim())
-                current.clear()
-                current.append(sentence)
-            } else {
-                if (current.isNotEmpty()) current.append(" ")
-                current.append(sentence)
-            }
-        }
-
-        if (current.isNotBlank()) {
-            chunks.add(current.toString().trim())
-        }
-
-        return chunks.ifEmpty { listOf(text) }
     }
 
     private fun escapeJson(text: String): String {

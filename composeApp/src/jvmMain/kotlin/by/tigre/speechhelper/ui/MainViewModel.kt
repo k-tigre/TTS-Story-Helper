@@ -12,16 +12,21 @@ import by.tigre.speechhelper.data.EpubParser
 import by.tigre.speechhelper.data.Fb2Parser
 import by.tigre.speechhelper.data.ParsedBook
 import by.tigre.speechhelper.data.MarkupResult
+import by.tigre.speechhelper.data.LocalTtsApi
 import by.tigre.speechhelper.data.SessionStorage
-import by.tigre.speechhelper.data.SpeechKitApi
+import by.tigre.speechhelper.data.SpeechSynthesizer
 import by.tigre.speechhelper.data.SynthesisResult
+import by.tigre.speechhelper.data.WavMerge
 import by.tigre.speechhelper.domain.API_VOICES
 import by.tigre.speechhelper.domain.FORMATS
+import by.tigre.speechhelper.domain.LocalTtsSettings
+import by.tigre.speechhelper.domain.SynthesisBackend
 import by.tigre.speechhelper.domain.TextParser
 import by.tigre.speechhelper.domain.TextSegment
 import by.tigre.speechhelper.domain.ValidationResult
 import by.tigre.speechhelper.domain.VoiceSettings
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
@@ -52,6 +57,9 @@ class MainViewModel(private val scope: CoroutineScope) {
     var speed by mutableStateOf(1.0)
     var pitchShift by mutableStateOf(0.0)
     var selectedRole by mutableStateOf("")
+
+    var synthesisBackend by mutableStateOf(SessionStorage.synthesisBackend)
+    var localTtsSettings by mutableStateOf(SessionStorage.localTtsSettings)
 
     // Loading/progress
     var isLoading by mutableStateOf(false)
@@ -120,6 +128,37 @@ class MainViewModel(private val scope: CoroutineScope) {
         }
     }
 
+    fun onSynthesisBackendChange(backend: SynthesisBackend) {
+        synthesisBackend = backend
+        SessionStorage.synthesisBackend = backend
+    }
+
+    fun onLocalTtsSettingsChange(settings: LocalTtsSettings) {
+        localTtsSettings = settings
+        SessionStorage.localTtsSettings = settings
+    }
+
+    fun checkLocalTtsConnection() {
+        scope.launch {
+            val ok = LocalTtsApi.checkHealth(localTtsSettings.baseUrl)
+            statusMessage = if (ok) {
+                "Локальный TTS: сервер отвечает"
+            } else {
+                "Локальный TTS: нет ответа (запустите сервер из каталога local-tts-server)"
+            }
+        }
+    }
+
+    fun synthesizeAudio(text: String, settings: VoiceSettings, format: String): Flow<SynthesisResult> =
+        SpeechSynthesizer.synthesize(
+            text = text,
+            voiceSettings = settings,
+            outputFormat = format,
+            backend = synthesisBackend,
+            localSettings = localTtsSettings,
+            cloudToken = TokenStorage.iamToken,
+        )
+
     // ── Chapter management ────────────────────────────────────────────────────
 
     fun saveCurrentChapter() {
@@ -178,6 +217,8 @@ class MainViewModel(private val scope: CoroutineScope) {
         chapterAudioPath = null
         voiceMapping.clear()
         currentBookName = ""
+        synthesisBackend = SessionStorage.synthesisBackend
+        localTtsSettings = SessionStorage.localTtsSettings
         statusMessage = "Всё очищено"
         showClearAllDialog = false
     }
@@ -443,26 +484,26 @@ class MainViewModel(private val scope: CoroutineScope) {
 
     fun launchSimpleSynthesis() {
         val settings = voiceMapping["voice_main"] ?: VoiceSettings()
+        val outputFormat = if (synthesisBackend == SynthesisBackend.Local) "wav" else selectedFormat
         scope.launch {
             isLoading = true
             statusMessage = ""
             progressMessage = "Синтез речи\nголос: ${settings.voice}"
             try {
-                SpeechKitApi.synthesize(
+                SpeechSynthesizer.synthesize(
                     text = text,
-                    voice = settings.voice,
-                    role = settings.role.ifBlank { null },
-                    speed = settings.speed,
-                    pitchShift = settings.pitchShift,
-                    format = selectedFormat,
-                    token = TokenStorage.iamToken,
+                    voiceSettings = settings,
+                    outputFormat = outputFormat,
+                    backend = synthesisBackend,
+                    localSettings = localTtsSettings,
+                    cloudToken = TokenStorage.iamToken,
                 ).collectLatest { result ->
                     when (result) {
                         is SynthesisResult.InProgress ->
                             progressMessage = "Синтез речи\nголос: ${settings.voice}\n${result.message}"
                         is SynthesisResult.Done -> {
                             val chapterName = chapters.find { it.id == currentChapterId }?.name ?: ""
-                            val filePath = saveAudioFile(result.bytes, selectedFormat, currentBookName, chapterName)
+                            val filePath = saveAudioFile(result.bytes, outputFormat, currentBookName, chapterName)
                             SessionStorage.setChapterAudioPath(currentChapterId, filePath)
                             chapterAudioPath = filePath
                             statusMessage = "Сохранено: $filePath"
@@ -489,6 +530,9 @@ class MainViewModel(private val scope: CoroutineScope) {
             isLoading = true
             statusMessage = ""
             progressMessage = ""
+            val isLocal = synthesisBackend == SynthesisBackend.Local
+            val partExt = if (isLocal) "wav" else "mp3"
+            val outputFormat = if (isLocal) "wav" else "mp3"
             try {
                 val cacheDir = withContext(Dispatchers.IO) {
                     SessionStorage.getChapterCacheDir(currentChapterId)
@@ -501,7 +545,7 @@ class MainViewModel(private val scope: CoroutineScope) {
                     } else {
                         VoiceSettings()
                     }
-                    val partFile = File(cacheDir, "part_%03d.mp3".format(index))
+                    val partFile = File(cacheDir, "part_%03d.$partExt".format(index))
 
                     if (partFile.exists() && (retryVoice == null || segment.voiceName != retryVoice)) {
                         progressMessage = "Озвучивание ${index + 1} из ${segmentsList.size} — кэш"
@@ -509,14 +553,13 @@ class MainViewModel(private val scope: CoroutineScope) {
                     }
 
                     try {
-                        SpeechKitApi.synthesize(
+                        SpeechSynthesizer.synthesize(
                             text = segment.text,
-                            voice = settings.voice,
-                            role = settings.role.ifBlank { null },
-                            speed = settings.speed,
-                            pitchShift = settings.pitchShift,
-                            format = "mp3",
-                            token = TokenStorage.iamToken,
+                            voiceSettings = settings,
+                            outputFormat = outputFormat,
+                            backend = synthesisBackend,
+                            localSettings = localTtsSettings,
+                            cloudToken = TokenStorage.iamToken,
                         ).collectLatest { result ->
                             when (result) {
                                 is SynthesisResult.InProgress ->
@@ -534,16 +577,20 @@ class MainViewModel(private val scope: CoroutineScope) {
 
                 progressMessage = "Склейка аудио\n${segmentsList.size} сегментов"
                 val allParts = (0 until segmentsList.size).mapNotNull { i ->
-                    val f = File(cacheDir, "part_%03d.mp3".format(i))
+                    val f = File(cacheDir, "part_%03d.$partExt".format(i))
                     if (f.exists()) f.readBytes() else null
                 }
 
                 if (allParts.isEmpty()) {
                     statusMessage = "Ошибка: ни один сегмент не озвучен"
                 } else {
-                    val combined = allParts.reduce { acc, bytes -> acc + bytes }
+                    val combined = if (isLocal) {
+                        WavMerge.merge(allParts)
+                    } else {
+                        allParts.reduce { acc, bytes -> acc + bytes }
+                    }
                     val chapterName = chapters.find { it.id == currentChapterId }?.name ?: ""
-                    val filePath = saveAudioFile(combined, "mp3", currentBookName, chapterName)
+                    val filePath = saveAudioFile(combined, outputFormat, currentBookName, chapterName)
                     SessionStorage.setChapterAudioPath(currentChapterId, filePath)
                     chapterAudioPath = filePath
                     statusMessage = if (errors.isEmpty()) {

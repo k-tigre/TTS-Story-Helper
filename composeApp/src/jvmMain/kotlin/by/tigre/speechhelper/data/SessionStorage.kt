@@ -1,6 +1,8 @@
 package by.tigre.speechhelper.data
 
 import by.tigre.speechhelper.domain.ChapterInfo
+import by.tigre.speechhelper.domain.LocalTtsSettings
+import by.tigre.speechhelper.domain.SynthesisBackend
 import by.tigre.speechhelper.domain.VoiceSettings
 import java.io.File
 import java.time.LocalDateTime
@@ -12,10 +14,60 @@ object SessionStorage {
     private val currentChapterFile = File(dir, "current_chapter.txt")
     private val mappingFile = File(dir, "voice_mapping.txt")
     private val currentBookFile = File(dir, "current_book.txt")
+    private val synthesisPrefsFile = File(dir, "synthesis_prefs.txt")
 
     init {
         migrateIfNeeded()
     }
+
+    private fun readSynthPrefs(): MutableMap<String, String> =
+        synthesisPrefsFile.takeIf { it.exists() }
+            ?.readLines()
+            ?.mapNotNull { line ->
+                val i = line.indexOf('=')
+                if (i <= 0) null else line.take(i).trim() to line.substring(i + 1).trim()
+            }
+            ?.toMap()
+            ?.toMutableMap()
+            ?: mutableMapOf()
+
+    private fun writeSynthPrefs(m: Map<String, String>) {
+        synthesisPrefsFile.writeText(
+            m.entries.sortedBy { it.key }.joinToString("\n") { "${it.key}=${it.value}" },
+        )
+    }
+
+    var synthesisBackend: SynthesisBackend
+        get() = when (readSynthPrefs()["backend"]?.lowercase()) {
+            "local" -> SynthesisBackend.Local
+            else -> SynthesisBackend.Cloud
+        }
+        set(value) {
+            val m = readSynthPrefs()
+            m["backend"] = when (value) {
+                SynthesisBackend.Cloud -> "cloud"
+                SynthesisBackend.Local -> "local"
+            }
+            writeSynthPrefs(m)
+        }
+
+    var localTtsSettings: LocalTtsSettings
+        get() {
+            val m = readSynthPrefs()
+            val def = LocalTtsSettings()
+            return LocalTtsSettings(
+                baseUrl = m["local_base_url"]?.ifBlank { null } ?: def.baseUrl,
+                modelId = m["local_model"]?.ifBlank { null } ?: def.modelId,
+                sampleRate = m["local_sample_rate"]?.toIntOrNull() ?: def.sampleRate,
+            )
+        }
+        set(value) {
+            val m = readSynthPrefs()
+            m["local_base_url"] = value.baseUrl
+            m["local_model"] = value.modelId
+            m["local_sample_rate"] = value.sampleRate.toString()
+            writeSynthPrefs(m)
+        }
 
     private fun migrateIfNeeded() {
         val oldTextFile = File(dir, "session_text.txt")
@@ -321,5 +373,6 @@ object SessionStorage {
         if (currentChapterFile.exists()) currentChapterFile.delete()
         // Clear current book name
         if (currentBookFile.exists()) currentBookFile.delete()
+        if (synthesisPrefsFile.exists()) synthesisPrefsFile.delete()
     }
 }

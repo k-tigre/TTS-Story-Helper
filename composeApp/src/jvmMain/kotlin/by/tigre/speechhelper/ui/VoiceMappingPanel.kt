@@ -35,10 +35,13 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import by.tigre.speechhelper.domain.API_VOICES
 import by.tigre.speechhelper.domain.API_VOICES_INFO
+import by.tigre.speechhelper.domain.SILERO_V5_RU_SPEAKERS
+import by.tigre.speechhelper.domain.SynthesisBackend
 import by.tigre.speechhelper.domain.VoiceSettings
 
 @Composable
 fun VoiceMappingPanel(
+    synthesisBackend: SynthesisBackend,
     voiceNames: List<String>,
     activeVoiceNames: Set<String>,
     mapping: Map<String, VoiceSettings>,
@@ -114,12 +117,23 @@ fun VoiceMappingPanel(
                 val isActive = name in activeVoiceNames
                 val settings = mapping[name] ?: VoiceSettings()
                 val expanded = expandedVoices[name] ?: false
-                val voiceInfo = API_VOICES_INFO.find { it.id == settings.voice }
+                val isLocal = synthesisBackend == SynthesisBackend.Local
+                val voiceInfo = if (isLocal) null else API_VOICES_INFO.find { it.id == settings.voice }
                 val availableRoles = voiceInfo?.roles ?: emptyList()
+                val voiceOptions = if (isLocal) {
+                    (SILERO_V5_RU_SPEAKERS + settings.voice).distinct()
+                } else {
+                    API_VOICES
+                }
                 val contentAlpha = if (isActive) 1f else 0.45f
                 val speedSummary = "%.1f".format(settings.speed)
                 val pitchSummary = "%.0f".format(settings.pitchShift)
                 val genderIcon = voiceInfo?.gender ?: "?"
+                val summaryRight = if (isLocal) {
+                    "${settings.voice} | Silero | x$speedSummary | тон $pitchSummary"
+                } else {
+                    "${settings.voice}($genderIcon) | ${settings.role.ifBlank { "-" }} | x$speedSummary | ${pitchSummary}Hz"
+                }
 
                 Column {
                     // Collapsed header
@@ -143,7 +157,7 @@ fun VoiceMappingPanel(
                             color = MaterialTheme.colorScheme.onSurface.copy(alpha = contentAlpha),
                         )
                         Text(
-                            text = "${settings.voice}($genderIcon) | ${settings.role.ifBlank { "-" }} | x$speedSummary | ${pitchSummary}Hz",
+                            text = summaryRight,
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = contentAlpha),
                         )
@@ -162,7 +176,7 @@ fun VoiceMappingPanel(
                                 Text("Голос:", style = MaterialTheme.typography.bodySmall)
                                 DropdownSelector(
                                     label = "",
-                                    items = API_VOICES,
+                                    items = voiceOptions,
                                     selected = settings.voice,
                                     onSelect = { voice ->
                                         val newRoles = API_VOICES_INFO.find { it.id == voice }?.roles ?: emptyList()
@@ -172,7 +186,7 @@ fun VoiceMappingPanel(
                                 )
                             }
 
-                            if (availableRoles.isNotEmpty()) {
+                            if (!isLocal && availableRoles.isNotEmpty()) {
                                 Row(
                                     verticalAlignment = Alignment.CenterVertically,
                                     horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -192,7 +206,10 @@ fun VoiceMappingPanel(
                                 verticalAlignment = Alignment.CenterVertically,
                                 horizontalArrangement = Arrangement.spacedBy(4.dp),
                             ) {
-                                Text("Скорость: $speedSummary", style = MaterialTheme.typography.bodySmall)
+                                Text(
+                                    if (isLocal) "Скорость (SSML): $speedSummary" else "Скорость: $speedSummary",
+                                    style = MaterialTheme.typography.bodySmall,
+                                )
                                 Slider(
                                     value = settings.speed.toFloat(),
                                     onValueChange = { onSettingsChange(name, settings.copy(speed = it.toDouble())) },
@@ -205,7 +222,10 @@ fun VoiceMappingPanel(
                                 verticalAlignment = Alignment.CenterVertically,
                                 horizontalArrangement = Arrangement.spacedBy(4.dp),
                             ) {
-                                Text("Тон: $pitchSummary", style = MaterialTheme.typography.bodySmall)
+                                Text(
+                                    if (isLocal) "Тембр (SSML): $pitchSummary" else "Тон: $pitchSummary",
+                                    style = MaterialTheme.typography.bodySmall,
+                                )
                                 Slider(
                                     value = settings.pitchShift.toFloat(),
                                     onValueChange = { onSettingsChange(name, settings.copy(pitchShift = it.toDouble())) },
