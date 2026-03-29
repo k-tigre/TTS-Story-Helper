@@ -2,6 +2,7 @@ package by.tigre.speechhelper.data
 
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Element
+import org.jsoup.nodes.TextNode
 import java.io.File
 import java.util.zip.ZipFile
 
@@ -57,16 +58,24 @@ object EpubParser {
                 val htmlDoc = Jsoup.parse(html)
 
                 val chapterTitle = htmlDoc.selectFirst("h1, h2, h3, h4")?.text()?.trim() ?: ""
-                val text = extractHtmlText(htmlDoc.body() ?: htmlDoc.selectFirst("body") ?: continue)
+                val bodyEl = htmlDoc.body() ?: htmlDoc.selectFirst("body")
+                if (bodyEl == null) {
+                    println("[EpubParser] no body in '$fullPath', skip")
+                    continue
+                }
+                val text = extractHtmlText(bodyEl)
 
                 println("[EpubParser] item '$idref' href='$fullPath' title='${chapterTitle.take(50)}' len=${text.length}")
 
                 if (text.isNotBlank()) {
                     counter++
-                    chapters.add(ParsedChapter(
-                        name = chapterTitle.ifBlank { "Часть $counter" },
-                        text = text,
-                    ))
+                    val name = chapterTitle.ifBlank { "Часть $counter" }
+                    chapters.add(
+                        ParsedChapter(
+                            name = name,
+                            text = chapterTextWithEmbeddedTitle(name, text),
+                        ),
+                    )
                 }
             }
 
@@ -78,33 +87,56 @@ object EpubParser {
         }
     }
 
-    private fun extractHtmlText(body: Element): String {
+    /**
+     * EPUB chapters are often XHTML with mixed content, e.g. `<p>…<img/>…</p>`.
+     * Walking only [Element.children] drops text nodes and can yield empty "paragraphs"
+     * after the first inline tag. We walk [org.jsoup.nodes.Node.childNodes] and use
+     * full [Element.text] for known block tags.
+     */
+    private fun extractHtmlText(root: Element): String {
         val lines = mutableListOf<String>()
-        for (child in body.children()) {
-            val tag = child.tagName()
-            when {
-                tag in setOf("script", "style", "img", "figure", "nav") -> Unit
-                tag.matches(Regex("h[1-6]")) -> {
-                    val text = child.text().trim()
-                    if (text.isNotBlank()) lines.add(text)
-                }
-                tag == "p" || tag == "div" || tag == "section" || tag == "article" -> {
-                    if (child.children().isEmpty()) {
-                        // Leaf block
-                        val text = child.text().trim()
-                        if (text.isNotBlank()) lines.add(text)
-                    } else {
-                        // Recurse into containers
-                        val inner = extractHtmlText(child)
-                        if (inner.isNotBlank()) lines.add(inner)
+
+        fun walk(parent: Element) {
+            for (node in parent.childNodes()) {
+                when (node) {
+                    is TextNode -> {
+                        val t = node.text().trim()
+                        if (t.isNotEmpty()) lines.add(t)
                     }
-                }
-                else -> {
-                    val text = child.text().trim()
-                    if (text.isNotBlank()) lines.add(text)
+                    is Element -> {
+                        val tag = node.tagName().lowercase()
+                        when {
+                            tag in setOf("script", "style", "img", "figure", "nav", "noscript") -> Unit
+                            tag.matches(Regex("h[1-6]")) -> {
+                                val t = node.text().trim()
+                                if (t.isNotBlank()) lines.add(t)
+                            }
+                            tag in setOf(
+                                "p",
+                                "li",
+                                "blockquote",
+                                "pre",
+                                "td",
+                                "th",
+                                "dt",
+                                "dd",
+                                "caption",
+                                "figcaption",
+                                "address",
+                            ) -> {
+                                val t =
+                                    if (tag == "pre") node.wholeText().trim()
+                                    else node.text().trim()
+                                if (t.isNotBlank()) lines.add(t)
+                            }
+                            else -> walk(node)
+                        }
+                    }
                 }
             }
         }
+
+        walk(root)
         return lines.joinToString("\n\n").trim()
     }
 }
