@@ -8,6 +8,16 @@ import java.io.File
 data class ParsedBook(val title: String, val chapters: List<ParsedChapter>)
 data class ParsedChapter(val name: String, val text: String)
 
+/** Вставляет название главы в начало текста, если его там ещё нет (FB2 не включает title в тело; EPUB часто уже даёт заголовок как h1). */
+internal fun chapterTextWithEmbeddedTitle(chapterName: String, bodyText: String): String {
+    val name = chapterName.trim()
+    val body = bodyText.trimStart()
+    if (name.isBlank()) return bodyText.trim()
+    val firstNonEmpty = body.lineSequence().map { it.trim() }.firstOrNull { it.isNotEmpty() } ?: ""
+    if (firstNonEmpty == name) return bodyText.trim()
+    return "$name\n\n${bodyText.trimStart()}"
+}
+
 object Fb2Parser {
 
     fun parse(file: File): ParsedBook {
@@ -47,13 +57,12 @@ object Fb2Parser {
             when {
                 hasDirectParagraphs -> {
                     // Has real text — add as chapter, ignore nested sections inside
-                    val text = extractSectionText(section)
+                    val rawText = extractSectionText(section)
                     counter[0]++
-                    result.add(ParsedChapter(
-                        name = chapterName.ifBlank { "Часть ${counter[0]}" },
-                        text = text,
-                    ))
-                    println("[Fb2Parser] ${indent}  → added as chapter '${chapterName.ifBlank { "Часть ${counter[0]}" }}' (${text.length} chars)")
+                    val name = chapterName.ifBlank { "Часть ${counter[0]}" }
+                    val text = chapterTextWithEmbeddedTitle(name, rawText)
+                    result.add(ParsedChapter(name = name, text = text))
+                    println("[Fb2Parser] ${indent}  → added as chapter '$name' (${text.length} chars)")
                 }
                 hasNestedSections -> {
                     // Container-only section — recurse
@@ -62,13 +71,12 @@ object Fb2Parser {
                 }
                 else -> {
                     // Leaf section with no <p> and no nested sections (e.g. only image)
-                    val text = extractSectionText(section)
-                    if (text.isNotBlank()) {
+                    val rawText = extractSectionText(section)
+                    if (rawText.isNotBlank()) {
                         counter[0]++
-                        result.add(ParsedChapter(
-                            name = chapterName.ifBlank { "Часть ${counter[0]}" },
-                            text = text,
-                        ))
+                        val name = chapterName.ifBlank { "Часть ${counter[0]}" }
+                        val text = chapterTextWithEmbeddedTitle(name, rawText)
+                        result.add(ParsedChapter(name = name, text = text))
                         println("[Fb2Parser] ${indent}  → added as leaf chapter (${text.length} chars)")
                     } else {
                         println("[Fb2Parser] ${indent}  → skipped (empty)")
