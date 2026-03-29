@@ -57,6 +57,9 @@ import by.tigre.speechhelper.TokenStorage
 import by.tigre.speechhelper.data.LlmModelsApi
 import by.tigre.speechhelper.data.SessionStorage
 import by.tigre.speechhelper.domain.LlmConfig
+import by.tigre.speechhelper.domain.MARKUP_CHUNK_MAX
+import by.tigre.speechhelper.domain.MARKUP_CHUNK_MIN
+import by.tigre.speechhelper.domain.defaultMarkupChunkForBaseUrl
 import java.awt.Desktop
 import java.net.URI
 import by.tigre.speechhelper.domain.LlmProvider
@@ -87,6 +90,7 @@ fun TokenDialog(
     var llmBaseUrl by remember { mutableStateOf(savedLlm.baseUrl.ifBlank { savedLlm.provider.defaultBaseUrl }) }
     var llmApiKey by remember { mutableStateOf(savedLlm.apiKey) }
     var llmModel by remember { mutableStateOf(savedLlm.model) }
+    var llmChunkText by remember { mutableStateOf(savedLlm.markupChunkChars.toString()) }
     val linkColor = Color(0xFF1976D2)
 
     val availableModels = remember { mutableStateListOf<String>() }
@@ -276,6 +280,32 @@ fun TokenDialog(
                     }
                 }
 
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    OutlinedTextField(
+                        value = llmChunkText,
+                        onValueChange = { llmChunkText = it.filter { c -> c.isDigit() } },
+                        label = { Text("Чанк разметки") },
+                        supportingText = {
+                            Text(
+                                "Макс. символов текста на один запрос авто-разметки к LLM",
+                                style = MaterialTheme.typography.bodySmall,
+                            )
+                        },
+                        modifier = Modifier.widthIn(min = 120.dp, max = 200.dp),
+                        singleLine = true,
+                    )
+                    TextButton(
+                        onClick = {
+                            llmChunkText = defaultMarkupChunkForBaseUrl(llmBaseUrl.trim()).toString()
+                        },
+                    ) {
+                        Text("Как для URL")
+                    }
+                }
+
                 if (modelsError.isNotBlank()) {
                     Text(modelsError, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
                 }
@@ -293,11 +323,14 @@ fun TokenDialog(
             Button(
                 onClick = {
                     TokenStorage.folderId = folderId
+                    val chunk = llmChunkText.toIntOrNull()?.coerceIn(MARKUP_CHUNK_MIN, MARKUP_CHUNK_MAX)
+                        ?: defaultMarkupChunkForBaseUrl(llmBaseUrl.trim())
                     TokenStorage.llmConfig = LlmConfig(
                         provider = llmProvider,
                         baseUrl = llmBaseUrl.trim(),
                         apiKey = llmApiKey.trim(),
                         model = llmModel.trim(),
+                        markupChunkChars = chunk,
                     )
                     onSave(token)
                 },

@@ -2,6 +2,9 @@ package by.tigre.speechhelper
 
 import by.tigre.speechhelper.domain.LlmConfig
 import by.tigre.speechhelper.domain.LlmProvider
+import by.tigre.speechhelper.domain.MARKUP_CHUNK_MAX
+import by.tigre.speechhelper.domain.MARKUP_CHUNK_MIN
+import by.tigre.speechhelper.domain.defaultMarkupChunkForBaseUrl
 import java.util.prefs.Preferences
 
 object TokenStorage {
@@ -13,6 +16,7 @@ object TokenStorage {
     private const val KEY_LLM_BASE_URL = "llm_base_url"
     private const val KEY_LLM_API_KEY = "llm_api_key"
     private const val KEY_LLM_MODEL = "llm_model"
+    private const val KEY_LLM_MARKUP_CHUNK = "llm_markup_chunk"
     private const val KEY_FIRST_LAUNCH = "first_launch_done"
 
     var iamToken: String
@@ -31,17 +35,32 @@ object TokenStorage {
     }
 
     var llmConfig: LlmConfig
-        get() = LlmConfig(
-            provider = runCatching { LlmProvider.valueOf(prefs.get(KEY_LLM_PROVIDER, "")) }.getOrDefault(LlmProvider.OpenAI),
-            baseUrl = prefs.get(KEY_LLM_BASE_URL, ""),
-            apiKey = prefs.get(KEY_LLM_API_KEY, ""),
-            model = prefs.get(KEY_LLM_MODEL, ""),
-        )
+        get() {
+            val baseUrl = prefs.get(KEY_LLM_BASE_URL, "")
+            val storedChunk = prefs.getInt(KEY_LLM_MARKUP_CHUNK, -1)
+            val chunk =
+                if (storedChunk < MARKUP_CHUNK_MIN) {
+                    defaultMarkupChunkForBaseUrl(baseUrl)
+                } else {
+                    storedChunk
+                }.coerceIn(MARKUP_CHUNK_MIN, MARKUP_CHUNK_MAX)
+            return LlmConfig(
+                provider = runCatching { LlmProvider.valueOf(prefs.get(KEY_LLM_PROVIDER, "")) }.getOrDefault(LlmProvider.OpenAI),
+                baseUrl = baseUrl,
+                apiKey = prefs.get(KEY_LLM_API_KEY, ""),
+                model = prefs.get(KEY_LLM_MODEL, ""),
+                markupChunkChars = chunk,
+            )
+        }
         set(value) {
             prefs.put(KEY_LLM_PROVIDER, value.provider.name)
             prefs.put(KEY_LLM_BASE_URL, value.baseUrl)
             prefs.put(KEY_LLM_API_KEY, value.apiKey)
             prefs.put(KEY_LLM_MODEL, value.model)
+            prefs.putInt(
+                KEY_LLM_MARKUP_CHUNK,
+                value.markupChunkChars.coerceIn(MARKUP_CHUNK_MIN, MARKUP_CHUNK_MAX),
+            )
         }
 
     fun hasCredentials(): Boolean = iamToken.isNotBlank()

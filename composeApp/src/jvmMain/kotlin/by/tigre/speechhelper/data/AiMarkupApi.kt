@@ -45,7 +45,7 @@ private data class Choice(
 
 object AiMarkupApi {
     private const val ENDPOINT = "https://ai.api.cloud.yandex.net/v1/chat/completions"
-    private const val CHUNK_LIMIT = 2000
+    private const val DEFAULT_CHUNK_LIMIT = 2000
 
     private val json = HttpClientProvider.jsonInstance
     private val client = HttpClientProvider.markupClient
@@ -56,7 +56,7 @@ object AiMarkupApi {
         folderId: String,
     ): Flow<MarkupResult> = flow {
         val model = "gpt://$folderId/deepseek-v32/latest"
-        val chunks = splitTextForAi(text)
+        val chunks = splitTextForAi(text, DEFAULT_CHUNK_LIMIT)
         println("[AiFixDialog] Text split into ${chunks.size} chunk(s)")
 
         val results = mutableListOf<String>()
@@ -84,7 +84,7 @@ object AiMarkupApi {
         existingVoices: Set<String> = emptySet(),
     ): Flow<MarkupResult> = flow {
         val systemPrompt = MarkupSystemPrompts.autoMarkupPrompt(existingVoices)
-        val chunks = splitTextForAi(text)
+        val chunks = splitTextForAi(text, DEFAULT_CHUNK_LIMIT)
         println("[AiMarkup] Text split into ${chunks.size} chunk(s), existingVoices=$existingVoices")
 
         if (chunks.size == 1) {
@@ -205,29 +205,29 @@ object AiMarkupApi {
         return content
     }
 
-    internal fun splitTextForAi(text: String): List<String> {
-        if (text.length <= CHUNK_LIMIT) return listOf(text)
+    internal fun splitTextForAi(text: String, chunkLimit: Int = DEFAULT_CHUNK_LIMIT): List<String> {
+        if (text.length <= chunkLimit) return listOf(text)
 
         val chunks = mutableListOf<String>()
         val paragraphs = text.split(Regex("""\n\s*\n"""))
         val current = StringBuilder()
 
         for (paragraph in paragraphs) {
-            if (paragraph.length > CHUNK_LIMIT) {
+            if (paragraph.length > chunkLimit) {
                 if (current.isNotBlank()) {
                     chunks.add(current.toString().trim())
                     current.clear()
                 }
                 val sentences = paragraph.split(Regex("""(?<=[.!?])\s+"""))
                 for (sentence in sentences) {
-                    if (current.length + sentence.length + 1 > CHUNK_LIMIT && current.isNotBlank()) {
+                    if (current.length + sentence.length + 1 > chunkLimit && current.isNotBlank()) {
                         chunks.add(current.toString().trim())
                         current.clear()
                     }
                     if (current.isNotEmpty()) current.append(" ")
                     current.append(sentence)
                 }
-            } else if (current.length + paragraph.length + 2 > CHUNK_LIMIT) {
+            } else if (current.length + paragraph.length + 2 > chunkLimit) {
                 chunks.add(current.toString().trim())
                 current.clear()
                 current.append(paragraph)

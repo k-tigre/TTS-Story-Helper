@@ -56,8 +56,8 @@ object OpenAiMarkupApi {
         existingVoices: Set<String> = emptySet(),
     ): Flow<MarkupResult> = flow {
         val systemPrompt = MarkupSystemPrompts.autoMarkupPrompt(existingVoices)
-        val chunks = AiMarkupApi.splitTextForAi(text)
-        println("[OpenAiMarkup] Text split into ${chunks.size} chunk(s), model=${config.model}")
+        val chunks = AiMarkupApi.splitTextForAi(text, config.markupChunkChars)
+        println("[OpenAiMarkup] Text split into ${chunks.size} chunk(s), model=${config.model}, chunkLimit=${config.markupChunkChars}")
 
         if (chunks.size == 1) {
             emit(MarkupResult.InProgress("Auto markup..."))
@@ -81,8 +81,8 @@ object OpenAiMarkupApi {
         text: String,
         config: LlmConfig,
     ): Flow<MarkupResult> = flow {
-        val chunks = AiMarkupApi.splitTextForAi(text)
-        println("[OpenAiFixDialog] Text split into ${chunks.size} chunk(s)")
+        val chunks = AiMarkupApi.splitTextForAi(text, config.markupChunkChars)
+        println("[OpenAiFixDialog] Text split into ${chunks.size} chunk(s), chunkLimit=${config.markupChunkChars}")
 
         val results = mutableListOf<String>()
         for ((i, chunk) in chunks.withIndex()) {

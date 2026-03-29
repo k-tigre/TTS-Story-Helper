@@ -53,11 +53,23 @@ enum class LlmProvider(val label: String, val defaultBaseUrl: String) {
     YandexCloud("Yandex Cloud", "https://ai.api.cloud.yandex.net/v1"),
 }
 
+const val MARKUP_CHUNK_LOCAL_DEFAULT = 1500
+const val MARKUP_CHUNK_REMOTE_DEFAULT = 3000
+const val MARKUP_CHUNK_MIN = 500
+const val MARKUP_CHUNK_MAX = 32000
+
+/** Предлагаемый размер чанка авто-разметки: локальный адрес — меньше, удалённый API — больше. */
+fun defaultMarkupChunkForBaseUrl(baseUrl: String): Int {
+    val u = baseUrl.lowercase()
+    return if ("localhost" in u || "127.0.0.1" in u) MARKUP_CHUNK_LOCAL_DEFAULT else MARKUP_CHUNK_REMOTE_DEFAULT
+}
+
 data class LlmConfig(
     val provider: LlmProvider = LlmProvider.OpenAI,
     val baseUrl: String = "",
     val apiKey: String = "",
     val model: String = "",
+    val markupChunkChars: Int = defaultMarkupChunkForBaseUrl(baseUrl),
 ) {
     val isConfigured: Boolean get() = model.isNotBlank()
 }
