@@ -44,44 +44,10 @@ private data class Choice(
 
 object AiMarkupApi {
     private const val ENDPOINT = "https://ai.api.cloud.yandex.net/v1/chat/completions"
-    private const val CHUNK_LIMIT = 3000
+    private const val CHUNK_LIMIT = 2000
 
     private val json = HttpClientProvider.jsonInstance
     private val client = HttpClientProvider.markupClient
-
-    private val BASE_SYSTEM_PROMPT = """
-Нужно для озвучки через Yandex SpeechKit модифицировать текст, добавить акценты, разбить на голоса, используем TTS-разметка текста, паузы дополнительно если нужно указываем как <[small]>. Допустимые значения: tiny, small, medium, large, huge
-
-Пример выделение голоса: "[voice_actor]Говорит профессор[/voice_actor], обычный голос, [голос2_нежный]Говорит леди[/голос2_нежный]" - нужно поставить начало и конец голоса - это важно! В конце голоса не забывай закрывающий тэг ставить.
-Голосам можно добавлять эмоциональные оттенки, при необходимости добавлять еще голоса, помечай новый голоса мужской или женский. 
-Рассказчик всегда один голос, он без эмоциональных оттенков.
-Другие голоса добавляй только для диалогов.
-Обязательно закрывай тэг голоса. Паузы оставляй только между открытым тэгом голоса и закрытым тегом голоса.
-
-ВАЖНО: Пример как обрабатывать диалоги:
-— Это система подачи, — объяснил парень, видя растерянное лицо Тёмы. — Она слепая как крот. Если зазеваешься — прищемит так, что мало не покажется. Ты тот самый Серебряков?
-
-должно получится в таком виде:
-[voice_actor]
-— Это система подачи, —  
-[/voice_actor]
-[voice_main]
-объяснил парень, видя растерянное лицо Тёмы.
-[/voice_main]
-[voice_actor]
-Она слепая как крот. Если зазеваешься — прищемит так, что мало не покажется. Ты тот самый Серебряков?
-[/voice_actor]
-
-ВАЖНО: проверь диалоги
-
-ВАЖНО: Нельзя менять содержание текста!Верни ТОЛЬКО размеченный текст, без пояснений.
-"""
-
-    private fun buildSystemPrompt(existingVoices: Set<String>): String {
-        if (existingVoices.isEmpty()) return BASE_SYSTEM_PROMPT
-        val voicesList = existingVoices.joinToString(", ") { it }
-        return "$BASE_SYSTEM_PROMPT\n\nВ книге уже используются следующие голоса: $voicesList. Используй эти же имена голосов для разметки, не придумывай новые без необходимости."
-    }
 
     fun fixDialog(
         text: String,
@@ -100,7 +66,7 @@ object AiMarkupApi {
                 model = model,
                 token = token,
                 messages = listOf(
-                    ChatMessage(role = "system", content = DIALOG_FIX_PROMPT),
+                    ChatMessage(role = "system", content = MarkupSystemPrompts.dialogFixPrompt),
                     ChatMessage(role = "user", content = chunk),
                 ),
             )
@@ -116,7 +82,7 @@ object AiMarkupApi {
         folderId: String,
         existingVoices: Set<String> = emptySet(),
     ): Flow<MarkupResult> = flow {
-        val systemPrompt = buildSystemPrompt(existingVoices)
+        val systemPrompt = MarkupSystemPrompts.autoMarkupPrompt(existingVoices)
         val chunks = splitTextForAi(text)
         println("[AiMarkup] Text split into ${chunks.size} chunk(s), existingVoices=$existingVoices")
 
@@ -137,25 +103,6 @@ object AiMarkupApi {
         println("[AiMarkup] All chunks processed")
         emit(MarkupResult.Done(results.joinToString("\n")))
     }
-
-    private val DIALOG_FIX_PROMPT = """
-Проверь размеченный текст. Убедись, что в диалогах слова автора (например "сказал он", "ответила она", "пробормотал он, отступая") вынесены в голос рассказчика, а не произносятся голосом персонажа.
-
-Пример НЕПРАВИЛЬНОЙ разметки:
-[voice_actor]
-— Я не понимаю, о чём вы, — пробормотал он, отступая на шаг.
-[/voice_actor]
-
-Пример ПРАВИЛЬНОЙ разметки:
-[voice_actor]
-— Я не понимаю, о чём вы, —
-[/voice_actor]
-[voice_main]
-пробормотал он, отступая на шаг.
-[/voice_main]
-
-Исправь все такие места. Верни ТОЛЬКО исправленный размеченный текст, без пояснений.
-""".trimIndent()
 
     private suspend fun requestMarkup(
         text: String,
@@ -189,7 +136,7 @@ object AiMarkupApi {
 //                ChatMessage(role = "system", content = systemPrompt),
 //                ChatMessage(role = "user", content = text),
 //                ChatMessage(role = "assistant", content = firstResult),
-//                ChatMessage(role = "user", content = DIALOG_FIX_PROMPT),
+//                ChatMessage(role = "user", content = MarkupSystemPrompts.dialogFixPrompt),
 //            ),
 //        )
 //        println("[AiMarkup] Pass 2 done (${finalResult.length} chars)")

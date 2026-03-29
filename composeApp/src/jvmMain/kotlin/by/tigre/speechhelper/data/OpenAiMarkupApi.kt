@@ -50,65 +50,12 @@ object OpenAiMarkupApi {
     private val client = HttpClientProvider.markupClient
     private val json = HttpClientProvider.jsonInstance
 
-    private val BASE_SYSTEM_PROMPT = """
-Нужно для озвучки через Yandex SpeechKit модифицировать текст, добавить акценты, разбить на голоса, используем TTS-разметка текста, паузы дополнительно если нужно указываем как <[small]>. Допустимые значения: tiny, small, medium, large, huge
-
-Пример выделение голоса: "[voice_actor]Говорит профессор[/voice_actor], обычный голос, [голос2_нежный]Говорит леди[/голос2_нежный]" - нужно поставить начало и конец голоса - это важно! В конце голоса не забывай закрывающий тэг ставить.
-Голосам можно добавлять эмоциональные оттенки, при необходимости добавлять еще голоса.
-Рассказчик всегда один голос, он без эмоциональных отттенков.
-Другие голоса добавляй только для диалогов.
-Обязательно закрывай тэг голоса. Паузы оставляй внутри голоса.
-
-ВАЖНО: Пример как обрабатывать диалоги:
-— Это система подачи, — объяснил парень, видя растерянное лицо Тёмы. — Она слепая как крот. Если зазеваешься — прищемит так, что мало не покажется. Ты тот самый Серебряков?
-
-должно получится в таком виде:
-[voice_actor]
-— Это система подачи, —
-[/voice_actor]
-[voice_main]
-объяснил парень, видя растерянное лицо Тёмы.
-[/voice_main]
-[voice_actor]
-Она слепая как крот. Если зазеваешься — прищемит так, что мало не покажется. Ты тот самый Серебряков?
-[/voice_actor]
-
-ВАЖНО: проверь диалоги
-
-ВАЖНО: Нельзя менять содержание текста!Верни ТОЛЬКО размеченный текст, без пояснений.
-"""
-
-    private val DIALOG_FIX_PROMPT = """
-Проверь размеченный текст. Убедись, что в диалогах слова автора (например "сказал он", "ответила она", "пробормотал он, отступая") вынесены в голос рассказчика, а не произносятся голосом персонажа.
-
-Пример НЕПРАВИЛЬНОЙ разметки:
-[voice_actor]
-— Я не понимаю, о чём вы, — пробормотал он, отступая на шаг.
-[/voice_actor]
-
-Пример ПРАВИЛЬНОЙ разметки:
-[voice_actor]
-— Я не понимаю, о чём вы, —
-[/voice_actor]
-[voice_main]
-пробормотал он, отступая на шаг.
-[/voice_main]
-
-Исправь все такие места. Верни ТОЛЬКО исправленный размеченный текст, без пояснений.
-""".trimIndent()
-
-    private fun buildSystemPrompt(existingVoices: Set<String>): String {
-        if (existingVoices.isEmpty()) return BASE_SYSTEM_PROMPT
-        val voicesList = existingVoices.joinToString(", ")
-        return "$BASE_SYSTEM_PROMPT\n\nВ книге уже используются следующие голоса: $voicesList. Используй эти же имена голосов для разметки, не придумывай новые без необходимости."
-    }
-
     fun autoMarkup(
         text: String,
         config: LlmConfig,
         existingVoices: Set<String> = emptySet(),
     ): Flow<MarkupResult> = flow {
-        val systemPrompt = buildSystemPrompt(existingVoices)
+        val systemPrompt = MarkupSystemPrompts.autoMarkupPrompt(existingVoices)
         val chunks = AiMarkupApi.splitTextForAi(text)
         println("[OpenAiMarkup] Text split into ${chunks.size} chunk(s), model=${config.model}")
 
@@ -143,7 +90,7 @@ object OpenAiMarkupApi {
             val result = sendChat(
                 config = config,
                 messages = listOf(
-                    OaiChatMessage(role = "system", content = DIALOG_FIX_PROMPT),
+                    OaiChatMessage(role = "system", content = MarkupSystemPrompts.dialogFixPrompt),
                     OaiChatMessage(role = "user", content = chunk),
                 ),
             )
