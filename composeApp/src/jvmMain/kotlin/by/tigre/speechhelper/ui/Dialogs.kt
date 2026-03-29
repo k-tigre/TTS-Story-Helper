@@ -116,7 +116,7 @@ fun TokenDialog(
                     apiKey = llmApiKey.trim(),
                     model = "",
                 )
-                val models = LlmModelsApi.fetchModels(config, folderId)
+                val models = LlmModelsApi.fetchModels(config)
                 availableModels.addAll(models)
                 if (models.isEmpty()) modelsError = "Моделей не найдено"
             } catch (e: Exception) {
@@ -700,6 +700,10 @@ fun HelpDialog(onDismiss: () -> Unit) {
         "link_folder_id" to "https://yandex.cloud/ru/docs/resource-manager/operations/folder/get-id",
         "link_speechkit" to "https://yandex.cloud/ru/docs/speechkit/",
         "link_console" to "https://console.yandex.cloud/",
+        "link_openai" to "https://platform.openai.com/docs/overview",
+        "link_ollama" to "https://ollama.com/",
+        "link_lm_studio" to "https://lmstudio.ai/",
+        "link_yandex_foundation" to "https://yandex.cloud/ru/docs/foundation-models/",
     )
 
     val annotatedText = buildAnnotatedString {
@@ -708,13 +712,16 @@ fun HelpDialog(onDismiss: () -> Unit) {
             append("О программе\n")
         }
         append("SpeechHelper — приложение для озвучивания текстов с помощью Yandex SpeechKit. ")
-        append("Поддерживает озвучивание одним голосом и многоголосую озвучку с автоматической разметкой диалогов.\n\n")
+        append("Поддерживает озвучивание одним голосом и многоголосую озвучку с автоматической разметкой диалогов. ")
+        append("Разметку можно выполнять через Yandex AI по умолчанию или через отдельно настроенного провайдера LLM (OpenAI-совместимый API).\n\n")
 
         // ── Настройка ──
         withStyle(SpanStyle(fontWeight = FontWeight.Bold)) {
-            append("1. Настройка учётных данных\n")
+            append("1. Настройка Yandex Cloud (SpeechKit)\n")
         }
-        append("Для работы приложения необходимы API Key и Folder ID из Yandex Cloud.\n\n")
+        append("Для синтеза речи нужны API Key и Folder ID из Yandex Cloud. ")
+        append("Если в настройках не задана модель LLM, те же данные используются для «Авто-разметки» через ")
+        append("Yandex Foundation Models (фиксированная модель deepseek-v32 в вашем каталоге).\n\n")
 
         append("Как получить API Key:\n")
         append("  1. Зарегистрируйтесь или войдите в ")
@@ -747,9 +754,66 @@ fun HelpDialog(onDismiss: () -> Unit) {
         withStyle(SpanStyle(fontWeight = FontWeight.Bold)) { append("\u2699") }
         append(" (шестерёнка) в правом верхнем углу.\n\n")
 
+        // ── LLM ──
+        withStyle(SpanStyle(fontWeight = FontWeight.Bold)) {
+            append("2. LLM для авто-разметки (опционально)\n")
+        }
+        append("В том же окне настроек есть блок «LLM для авто-разметки». ")
+        append("Если выбран провайдер, указан URL (где нужен), задана модель и настройки сохранены, ")
+        append("кнопки «Авто-разметка» и исправление диалогов в сегментах идут через этот LLM (эндпоинт chat/completions). ")
+        append("Иначе используется встроенный путь через Yandex AI (см. п. 1).\n\n")
+
+        withStyle(SpanStyle(fontWeight = FontWeight.Bold)) { append("OpenAI") }
+        append(" — облако OpenAI или любой сервис с OpenAI-совместимым API. ")
+        append("По умолчанию URL ")
+        append(LlmProvider.OpenAI.defaultBaseUrl)
+        append(", нужен API Key. Кнопка «Подключить» запрашивает список моделей с ")
+        pushStringAnnotation("url", links["link_openai"]!!)
+        withStyle(SpanStyle(color = linkColor, textDecoration = TextDecoration.Underline)) {
+            append("документации OpenAI")
+        }
+        pop()
+        append(".\n\n")
+
+        withStyle(SpanStyle(fontWeight = FontWeight.Bold)) { append("Ollama") }
+        append(" — локальные модели на вашем компьютере. Включите в Ollama сервер с OpenAI-совместимым API; ")
+        append("обычно адрес ")
+        append(LlmProvider.Ollama.defaultBaseUrl)
+        append(". Поле «API Token» можно оставить пустым. Подробнее: ")
+        pushStringAnnotation("url", links["link_ollama"]!!)
+        withStyle(SpanStyle(color = linkColor, textDecoration = TextDecoration.Underline)) {
+            append("ollama.com")
+        }
+        pop()
+        append(".\n\n")
+
+        withStyle(SpanStyle(fontWeight = FontWeight.Bold)) { append("LM Studio") }
+        append(" — локальный сервер из LM Studio (раздел Local Server). Обычно ")
+        append(LlmProvider.LMStudio.defaultBaseUrl)
+        append(", токен при необходимости. ")
+        pushStringAnnotation("url", links["link_lm_studio"]!!)
+        withStyle(SpanStyle(color = linkColor, textDecoration = TextDecoration.Underline)) {
+            append("lmstudio.ai")
+        }
+        pop()
+        append(".\n\n")
+
+        withStyle(SpanStyle(fontWeight = FontWeight.Bold)) { append("Yandex Cloud") }
+        append(" — модели Foundation Models в вашем каталоге. Авторизация тем же API Key, что для SpeechKit (заголовок Api-Key); ")
+        append("Folder ID должен быть указан выше в настройках. URL по умолчанию ")
+        append(LlmProvider.YandexCloud.defaultBaseUrl)
+        append(". Имя модели из списка в приложении подставляется в URI вида gpt://<folder>/<модель>/latest. ")
+        append("В каталоге должны быть включены сервисы AI. Справка: ")
+        pushStringAnnotation("url", links["link_yandex_foundation"]!!)
+        withStyle(SpanStyle(color = linkColor, textDecoration = TextDecoration.Underline)) {
+            append("Foundation Models в Yandex Cloud")
+        }
+        pop()
+        append(".\n\n")
+
         // ── Алгоритм работы ──
         withStyle(SpanStyle(fontWeight = FontWeight.Bold)) {
-            append("2. Алгоритм работы\n")
+            append("3. Алгоритм работы\n")
         }
 
         withStyle(SpanStyle(fontWeight = FontWeight.Bold)) {
@@ -763,7 +827,7 @@ fun HelpDialog(onDismiss: () -> Unit) {
             append("Многоголосая озвучка:\n")
         }
         append("  1. Вставьте текст в редактор\n")
-        append("  2. Нажмите «Авто-разметка» — AI расставит голосовые теги для персонажей и рассказчика\n")
+        append("  2. Нажмите «Авто-разметка» — AI расставит голосовые теги (настроенный LLM или Yandex по умолчанию)\n")
         append("  3. Проверьте разметку во вкладке «Текст» (левая колонка — исходный текст, правая — разметка)\n")
         append("  4. Нажмите «Проверить» для валидации (зелёный — совпадение, красный — пропущенные слова, оранжевый — лишние)\n")
         append("  5. На вкладке «Разбивка» можно редактировать отдельные сегменты, менять голос, разбивать на части\n")
@@ -772,7 +836,7 @@ fun HelpDialog(onDismiss: () -> Unit) {
 
         // ── Опции ──
         withStyle(SpanStyle(fontWeight = FontWeight.Bold)) {
-            append("3. Опции и возможности\n")
+            append("4. Опции и возможности\n")
         }
 
         withStyle(SpanStyle(fontWeight = FontWeight.Bold)) { append("Главы") }
@@ -798,7 +862,7 @@ fun HelpDialog(onDismiss: () -> Unit) {
 
         // ── Документация ──
         withStyle(SpanStyle(fontWeight = FontWeight.Bold)) {
-            append("4. Документация Yandex Cloud\n")
+            append("5. Документация и ссылки\n")
         }
         append("  - ")
         pushStringAnnotation("url", links["link_speechkit"]!!)
@@ -822,6 +886,30 @@ fun HelpDialog(onDismiss: () -> Unit) {
         pushStringAnnotation("url", links["link_console"]!!)
         withStyle(SpanStyle(color = linkColor, textDecoration = TextDecoration.Underline)) {
             append("Yandex Cloud Console")
+        }
+        pop()
+        append("\n  - ")
+        pushStringAnnotation("url", links["link_yandex_foundation"]!!)
+        withStyle(SpanStyle(color = linkColor, textDecoration = TextDecoration.Underline)) {
+            append("Yandex Foundation Models (LLM в облаке)")
+        }
+        pop()
+        append("\n  - ")
+        pushStringAnnotation("url", links["link_openai"]!!)
+        withStyle(SpanStyle(color = linkColor, textDecoration = TextDecoration.Underline)) {
+            append("OpenAI API (совместимые провайдеры)")
+        }
+        pop()
+        append("\n  - ")
+        pushStringAnnotation("url", links["link_ollama"]!!)
+        withStyle(SpanStyle(color = linkColor, textDecoration = TextDecoration.Underline)) {
+            append("Ollama")
+        }
+        pop()
+        append("\n  - ")
+        pushStringAnnotation("url", links["link_lm_studio"]!!)
+        withStyle(SpanStyle(color = linkColor, textDecoration = TextDecoration.Underline)) {
+            append("LM Studio")
         }
         pop()
     }

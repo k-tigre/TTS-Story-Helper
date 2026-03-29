@@ -669,9 +669,7 @@ class MainViewModel(private val scope: CoroutineScope) {
         if (distinct.isEmpty() || isLoading) return
         val llmConfig = TokenStorage.llmConfig
         if (llmConfig.isConfigured) {
-            pendingMarkupChapterIds = distinct
-            showFolderIdDialog = true
-            launchAutoMarkupWithLlm(llmConfig)
+            launchAutoMarkupWithLlm(llmConfig, distinct)
             return
         }
 
@@ -749,25 +747,53 @@ class MainViewModel(private val scope: CoroutineScope) {
             else -> "глав"
         }
 
-    private fun launchAutoMarkupWithLlm(config: LlmConfig) {
+    private fun launchAutoMarkupWithLlm(config: LlmConfig, chapterIds: List<String>) {
+        if (chapterIds.isEmpty() || isLoading) return
         isLoading = true
         progressMessage = "Авто-разметка (${config.model})..."
         statusMessage = ""
         scope.launch {
             try {
-                OpenAiMarkupApi.autoMarkup(
-                    text = text,
-                    config = config,
-                    existingVoices = voiceMapping.keys.toSet(),
-                ).collectLatest { result ->
-                    when (result) {
-                        is MarkupResult.InProgress -> progressMessage = result.message
-                        is MarkupResult.Done -> {
-                            text = result.text
-                            saveCurrentChapter()
-                            statusMessage = "Авто-разметка завершена (${config.model})"
+                saveCurrentChapter()
+                val errors = mutableListOf<String>()
+                val existingVoices = voiceMapping.keys.toSet()
+                for ((index, id) in chapterIds.withIndex()) {
+                    val raw = SessionStorage.getChapterText(id)
+                    if (raw.isBlank()) continue
+                    try {
+                        OpenAiMarkupApi.autoMarkup(
+                            text = raw,
+                            config = config,
+                            existingVoices = existingVoices,
+                        ).collectLatest { result ->
+                            when (result) {
+                                is MarkupResult.InProgress ->
+                                    progressMessage =
+                                        "Авто-разметка ${index + 1} из ${chapterIds.size}\n${result.message}"
+                                is MarkupResult.Done -> {
+                                    SessionStorage.setOriginalText(id, raw)
+                                    SessionStorage.setChapterText(id, result.text)
+                                    if (id == currentChapterId) {
+                                        originalText = raw
+                                        text = result.text
+                                        markupModeEnabled = true
+                                        revalidate()
+                                    }
+                                }
+                            }
                         }
+                    } catch (e: Exception) {
+                        val label = chapters.find { it.id == id }?.name ?: id
+                        errors.add("$label: ${e.message}")
+                        e.printStackTrace()
                     }
+                }
+                refreshChapters()
+                statusMessage = when {
+                    errors.isEmpty() ->
+                        "Авто-разметка: готово (${chapterIds.size} ${chapterWord(chapterIds.size)}) (${config.model})"
+                    else ->
+                        "Авто-разметка: есть ошибки (${errors.size})\n${errors.joinToString("\n")}"
                 }
             } catch (e: Exception) {
                 statusMessage = "Ошибка авто-разметки: ${e.message}"

@@ -3,9 +3,6 @@ package by.tigre.speechhelper.data
 import by.tigre.speechhelper.TokenStorage
 import by.tigre.speechhelper.domain.LlmConfig
 import by.tigre.speechhelper.domain.LlmProvider
-import io.ktor.client.HttpClient
-import io.ktor.client.engine.cio.CIO
-import io.ktor.client.plugins.contentnegotiation.ContentNegotiation
 import io.ktor.client.request.header
 import io.ktor.client.request.post
 import io.ktor.client.request.setBody
@@ -15,12 +12,11 @@ import io.ktor.http.ContentType
 import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpStatusCode
 import io.ktor.http.contentType
-import io.ktor.serialization.kotlinx.json.json
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
-import kotlinx.serialization.json.Json
 
 @Serializable
 private data class OaiChatRequest(
@@ -48,16 +44,11 @@ private data class OaiChoice(
 
 object OpenAiMarkupApi {
 
-    private val json = Json { ignoreUnknownKeys = true }
+    private const val MAX_RETRIES = 3
+    private const val INITIAL_RETRY_DELAY_MS = 1000L
 
-    private val client = HttpClient(CIO) {
-        engine {
-            requestTimeout = 240_000
-        }
-        install(ContentNegotiation) {
-            json(this@OpenAiMarkupApi.json)
-        }
-    }
+    private val client = HttpClientProvider.markupClient
+    private val json = HttpClientProvider.jsonInstance
 
     private val BASE_SYSTEM_PROMPT = """
 Нужно для озвучки через Yandex SpeechKit модифицировать текст, добавить акценты, разбить на голоса, используем TTS-разметка текста, паузы дополнительно если нужно указываем как <[small]>. Допустимые значения: tiny, small, medium, large, huge
@@ -119,10 +110,10 @@ object OpenAiMarkupApi {
     ): Flow<MarkupResult> = flow {
         val systemPrompt = buildSystemPrompt(existingVoices)
         val chunks = AiMarkupApi.splitTextForAi(text)
-        println("[OpenAiMarkup] Текст разбит на ${chunks.size} чанк(ов), model=${config.model}")
+        println("[OpenAiMarkup] Text split into ${chunks.size} chunk(s), model=${config.model}")
 
         if (chunks.size == 1) {
-            emit(MarkupResult.InProgress("Авто-разметка..."))
+            emit(MarkupResult.InProgress("Auto markup..."))
             val result = requestMarkup(chunks[0], config, systemPrompt)
             emit(MarkupResult.Done(result))
             return@flow
@@ -130,12 +121,12 @@ object OpenAiMarkupApi {
 
         val results = mutableListOf<String>()
         for ((i, chunk) in chunks.withIndex()) {
-            emit(MarkupResult.InProgress("Авто-разметка ${i + 1} из ${chunks.size}"))
-            println("[OpenAiMarkup] Обработка чанка ${i + 1}/${chunks.size} (${chunk.length} символов)")
+            emit(MarkupResult.InProgress("Auto markup ${i + 1} of ${chunks.size}"))
+            println("[OpenAiMarkup] Processing chunk ${i + 1}/${chunks.size} (${chunk.length} chars)")
             val result = requestMarkup(chunk, config, systemPrompt)
             results.add(result)
         }
-        println("[OpenAiMarkup] Все чанки обработаны")
+        println("[OpenAiMarkup] All chunks processed")
         emit(MarkupResult.Done(results.joinToString("\n")))
     }
 
@@ -144,11 +135,11 @@ object OpenAiMarkupApi {
         config: LlmConfig,
     ): Flow<MarkupResult> = flow {
         val chunks = AiMarkupApi.splitTextForAi(text)
-        println("[OpenAiFixDialog] Текст разбит на ${chunks.size} чанк(ов)")
+        println("[OpenAiFixDialog] Text split into ${chunks.size} chunk(s)")
 
         val results = mutableListOf<String>()
         for ((i, chunk) in chunks.withIndex()) {
-            emit(MarkupResult.InProgress("Исправление диалогов ${i + 1} из ${chunks.size}"))
+            emit(MarkupResult.InProgress("Fixing dialogs ${i + 1} of ${chunks.size}"))
             val result = sendChat(
                 config = config,
                 messages = listOf(
@@ -156,7 +147,7 @@ object OpenAiMarkupApi {
                     OaiChatMessage(role = "user", content = chunk),
                 ),
             )
-            results.add(result.replace("```", ""))
+            results.add(AiMarkupApi.fixMalformedTags(result.replace("```", "")))
         }
         emit(MarkupResult.Done(results.joinToString("\n")))
     }
@@ -166,7 +157,7 @@ object OpenAiMarkupApi {
         config: LlmConfig,
         systemPrompt: String,
     ): String {
-        println("[OpenAiMarkup] Запрос разметки (${text.length} символов)...")
+        println("[OpenAiMarkup] Markup request (${text.length} chars)...")
         val result = sendChat(
             config = config,
             messages = listOf(
@@ -174,8 +165,8 @@ object OpenAiMarkupApi {
                 OaiChatMessage(role = "user", content = text),
             ),
         )
-        println("[OpenAiMarkup] Получено ${result.length} символов")
-        return result.replace("```", "")
+        println("[OpenAiMarkup] Received ${result.length} chars")
+        return AiMarkupApi.fixMalformedTags(result.replace("```", ""))
     }
 
     private suspend fun sendChat(
@@ -197,34 +188,57 @@ object OpenAiMarkupApi {
             temperature = 0.5,
         )
 
-        println("[OpenAiMarkup] -> POST $endpoint (model=$resolvedModel)")
+        val totalChars = messages.sumOf { it.content.length }
+        println("[OpenAiMarkup] -> POST $endpoint (model=$resolvedModel, messages=${messages.size}, totalChars=$totalChars)")
 
-        val response = client.post {
-            url(endpoint)
-            when (config.provider) {
-                LlmProvider.YandexCloud ->
-                    header(HttpHeaders.Authorization, "Api-Key ${TokenStorage.iamToken}")
-                else ->
-                    if (config.apiKey.isNotBlank())
-                        header(HttpHeaders.Authorization, "Bearer ${config.apiKey}")
+        var lastException: Exception? = null
+        var delayMs = INITIAL_RETRY_DELAY_MS
+
+        for (attempt in 1..MAX_RETRIES) {
+            val startTime = System.currentTimeMillis()
+            try {
+                val response = client.post {
+                    url(endpoint)
+                    when (config.provider) {
+                        LlmProvider.YandexCloud ->
+                            header(HttpHeaders.Authorization, "Api-Key ${TokenStorage.iamToken}")
+                        else ->
+                            if (config.apiKey.isNotBlank())
+                                header(HttpHeaders.Authorization, "Bearer ${config.apiKey}")
+                    }
+                    contentType(ContentType.Application.Json)
+                    setBody(request)
+                }
+                val elapsed = System.currentTimeMillis() - startTime
+
+                println("[OpenAiMarkup] <- HTTP ${response.status.value} (attempt $attempt, ${elapsed}ms)")
+
+                if (response.status != HttpStatusCode.OK) {
+                    val body = response.bodyAsText()
+                    println("[OpenAiMarkup] ERROR: $body")
+                    throw AiMarkupException("LLM API error ${response.status.value}: $body")
+                }
+
+                val responseText = response.bodyAsText()
+                val chatResponse = json.decodeFromString<OaiChatResponse>(responseText)
+                val content = chatResponse.choices.firstOrNull()?.message?.content
+                    ?: throw AiMarkupException("No content in LLM response")
+                println("[OpenAiMarkup] <- Received ${content.length} chars")
+                return content
+
+            } catch (e: Exception) {
+                val elapsed = System.currentTimeMillis() - startTime
+                lastException = e
+                println("[OpenAiMarkup] Error on attempt $attempt after ${elapsed}ms: ${e.message}")
+
+                if (attempt < MAX_RETRIES) {
+                    println("[OpenAiMarkup] Retrying in ${delayMs}ms...")
+                    delay(delayMs)
+                    delayMs *= 2 // exponential backoff
+                }
             }
-            contentType(ContentType.Application.Json)
-            setBody(request)
         }
 
-        println("[OpenAiMarkup] <- HTTP ${response.status.value}")
-
-        if (response.status != HttpStatusCode.OK) {
-            val body = response.bodyAsText()
-            println("[OpenAiMarkup] ERROR: $body")
-            throw AiMarkupException("LLM API error ${response.status.value}: $body")
-        }
-
-        val responseText = response.bodyAsText()
-        val chatResponse = json.decodeFromString<OaiChatResponse>(responseText)
-        val content = chatResponse.choices.firstOrNull()?.message?.content
-            ?: throw AiMarkupException("No content in LLM response")
-        println("[OpenAiMarkup] <- Получено ${content.length} символов")
-        return content
+        throw lastException ?: AiMarkupException("Unknown error after $MAX_RETRIES attempts")
     }
 }

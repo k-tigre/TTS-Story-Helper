@@ -1,8 +1,5 @@
 package by.tigre.speechhelper.data
 
-import io.ktor.client.HttpClient
-import io.ktor.client.engine.cio.CIO
-import io.ktor.client.plugins.contentnegotiation.ContentNegotiation
 import io.ktor.client.request.header
 import io.ktor.client.request.post
 import io.ktor.client.request.setBody
@@ -11,12 +8,10 @@ import io.ktor.http.ContentType
 import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpStatusCode
 import io.ktor.http.contentType
-import io.ktor.serialization.kotlinx.json.json
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
-import kotlinx.serialization.json.Json
 
 sealed class MarkupResult {
     data class InProgress(val message: String) : MarkupResult()
@@ -49,18 +44,10 @@ private data class Choice(
 
 object AiMarkupApi {
     private const val ENDPOINT = "https://ai.api.cloud.yandex.net/v1/chat/completions"
-    private const val CHUNK_LIMIT = 1000
+    private const val CHUNK_LIMIT = 3000
 
-    private val json = Json { ignoreUnknownKeys = true }
-
-    private val client = HttpClient(CIO) {
-        engine {
-            requestTimeout = 240_000
-        }
-        install(ContentNegotiation) {
-            json(this@AiMarkupApi.json)
-        }
-    }
+    private val json = HttpClientProvider.jsonInstance
+    private val client = HttpClientProvider.markupClient
 
     private val BASE_SYSTEM_PROMPT = """
 Нужно для озвучки через Yandex SpeechKit модифицировать текст, добавить акценты, разбить на голоса, используем TTS-разметка текста, паузы дополнительно если нужно указываем как <[small]>. Допустимые значения: tiny, small, medium, large, huge
@@ -107,7 +94,7 @@ object AiMarkupApi {
 
         val results = mutableListOf<String>()
         for ((i, chunk) in chunks.withIndex()) {
-            emit(MarkupResult.InProgress("Исправление диалогов ${i + 1} из ${chunks.size}"))
+            emit(MarkupResult.InProgress("Fixing dialogs ${i + 1} of ${chunks.size}"))
             println("[AiFixDialog] Processing chunk ${i + 1}/${chunks.size} (${chunk.length} chars)")
             val result = sendChat(
                 model = model,
@@ -134,7 +121,7 @@ object AiMarkupApi {
         println("[AiMarkup] Text split into ${chunks.size} chunk(s), existingVoices=$existingVoices")
 
         if (chunks.size == 1) {
-            emit(MarkupResult.InProgress("Авто-разметка..."))
+            emit(MarkupResult.InProgress("Auto markup..."))
             val result = requestMarkup(chunks[0], token, folderId, systemPrompt)
             emit(MarkupResult.Done(result))
             return@flow
@@ -142,7 +129,7 @@ object AiMarkupApi {
 
         val results = mutableListOf<String>()
         for ((i, chunk) in chunks.withIndex()) {
-            emit(MarkupResult.InProgress("Авто-разметка ${i + 1} из ${chunks.size}"))
+            emit(MarkupResult.InProgress("Auto markup ${i + 1} of ${chunks.size}"))
             println("[AiMarkup] Processing chunk ${i + 1}/${chunks.size} (${chunk.length} chars)")
             val result = requestMarkup(chunk, token, folderId, systemPrompt)
             results.add(result)
@@ -178,8 +165,9 @@ object AiMarkupApi {
     ): String {
         val model = "gpt://$folderId/deepseek-v32/latest"
 
-        // Первый проход — основная разметка
+        // First pass — main markup
         println("[AiMarkup] Pass 1: main markup (${text.length} chars)...")
+        val startTime = System.currentTimeMillis()
         val firstResult = sendChat(
             model = model,
             token = token,
@@ -188,11 +176,12 @@ object AiMarkupApi {
                 ChatMessage(role = "user", content = text),
             ),
         )
-        println("[AiMarkup] Pass 1 done (${firstResult.length} chars)")
+        val elapsed = System.currentTimeMillis() - startTime
+        println("[AiMarkup] Pass 1 done (${firstResult.length} chars, ${elapsed}ms)")
 
-        // TODO: Второй проход временно отключён
-//        // Второй проход — исправление диалогов
-//        println("[AiMarkup] Проход 2: исправление диалогов...")
+        // TODO: Second pass temporarily disabled
+//        // Second pass — dialog fix
+//        println("[AiMarkup] Pass 2: fixing dialogs...")
 //        val finalResult = sendChat(
 //            model = model,
 //            token = token,
@@ -203,7 +192,7 @@ object AiMarkupApi {
 //                ChatMessage(role = "user", content = DIALOG_FIX_PROMPT),
 //            ),
 //        )
-//        println("[AiMarkup] Проход 2 завершён (${finalResult.length} символов)")
+//        println("[AiMarkup] Pass 2 done (${finalResult.length} chars)")
 //        return finalResult.replace("```", "")
 
         return fixMalformedTags(firstResult.replace("```", ""))
@@ -213,7 +202,7 @@ object AiMarkupApi {
      * AI иногда возвращает теги в формате <voice_name> вместо [voice_name].
      * Заменяем угловые скобки на квадратные для тегов голосов.
      */
-    private fun fixMalformedTags(text: String): String {
+    internal fun fixMalformedTags(text: String): String {
         return text
             .replace(Regex("""</([\wа-яА-ЯёЁ_]+)>""")) { "[/${it.groupValues[1]}]" }
             .replace(Regex("""<([\wа-яА-ЯёЁ_]+)>""")) { match ->
@@ -238,15 +227,18 @@ object AiMarkupApi {
             temperature = 0.5,
         )
 
-        println("[AiMarkup] -> POST $ENDPOINT (model=$model, messages=${messages.size}, totalChars=${messages.sumOf { it.content.length }})")
+        val totalChars = messages.sumOf { it.content.length }
+        println("[AiMarkup] -> POST $ENDPOINT (model=$model, messages=${messages.size}, totalChars=$totalChars)")
 
+        val startTime = System.currentTimeMillis()
         val response = client.post(ENDPOINT) {
             header(HttpHeaders.Authorization, "Api-Key $token")
             contentType(ContentType.Application.Json)
             setBody(request)
         }
+        val elapsed = System.currentTimeMillis() - startTime
 
-        println("[AiMarkup] <- HTTP ${response.status.value}")
+        println("[AiMarkup] <- HTTP ${response.status.value} (${elapsed}ms)")
 
         if (response.status != HttpStatusCode.OK) {
             val responseBody = response.bodyAsText()

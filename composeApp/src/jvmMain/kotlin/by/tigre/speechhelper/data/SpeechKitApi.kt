@@ -1,7 +1,5 @@
 package by.tigre.speechhelper.data
 
-import io.ktor.client.HttpClient
-import io.ktor.client.engine.cio.CIO
 import io.ktor.client.request.header
 import io.ktor.client.request.post
 import io.ktor.client.request.setBody
@@ -24,7 +22,7 @@ object SpeechKitApi {
     private const val ENDPOINT = "https://tts.api.cloud.yandex.net:443/tts/v3/utteranceSynthesis"
     private const val CHUNK_LIMIT = 240
 
-    private val client = HttpClient(CIO)
+    private val client = HttpClientProvider.defaultClient
 
     fun synthesize(
         text: String,
@@ -38,7 +36,7 @@ object SpeechKitApi {
         val chunks = SynthesisChunking.splitText(text, CHUNK_LIMIT)
 
         if (chunks.size == 1) {
-            emit(SynthesisResult.InProgress("Синтез речи..."))
+            emit(SynthesisResult.InProgress("Speech synthesis..."))
             val bytes = synthesizeChunk(chunks[0], voice, role, speed, pitchShift, format, token)
             emit(SynthesisResult.Done(bytes))
             return@flow
@@ -46,7 +44,7 @@ object SpeechKitApi {
 
         val output = ByteArrayOutputStream()
         for ((i, chunk) in chunks.withIndex()) {
-            emit(SynthesisResult.InProgress("Синтез речи: чанк ${i + 1} из ${chunks.size}"))
+            emit(SynthesisResult.InProgress("Speech synthesis: chunk ${i + 1} of ${chunks.size}"))
             val bytes = synthesizeChunk(chunk, voice, role, speed, pitchShift, format, token)
             output.write(bytes)
         }
@@ -83,15 +81,20 @@ object SpeechKitApi {
 
         val body = """{"text":"${escapeJson(text)}","outputAudioSpec":$outputSpec,"hints":[$hintsJson],"unsafeMode":true}"""
 
+        println("[SpeechKit] -> POST $ENDPOINT (text=${text.length} chars, voice=$voice, format=$format)")
+        val startTime = System.currentTimeMillis()
         val response = client.post(ENDPOINT) {
             header(HttpHeaders.Authorization, "Api-Key $token")
             contentType(ContentType.Application.Json)
             setBody(body)
         }
+        val elapsed = System.currentTimeMillis() - startTime
+
+        println("[SpeechKit] <- HTTP ${response.status.value} (${elapsed}ms)")
 
         if (response.status != HttpStatusCode.OK) {
             val responseBody = response.bodyAsText()
-            println("API error ${response.status.value}: $responseBody")
+            println("[SpeechKit] ERROR: $responseBody")
             throw SpeechKitException("API error ${response.status.value}: $responseBody")
         }
 

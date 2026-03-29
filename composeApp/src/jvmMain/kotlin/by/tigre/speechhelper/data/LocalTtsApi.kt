@@ -1,9 +1,6 @@
 package by.tigre.speechhelper.data
 
 import by.tigre.speechhelper.domain.LocalTtsSettings
-import io.ktor.client.HttpClient
-import io.ktor.client.engine.cio.CIO
-import io.ktor.client.plugins.contentnegotiation.ContentNegotiation
 import io.ktor.client.request.get
 import io.ktor.client.request.post
 import io.ktor.client.request.setBody
@@ -12,25 +9,18 @@ import io.ktor.client.statement.readRawBytes
 import io.ktor.http.ContentType
 import io.ktor.http.HttpStatusCode
 import io.ktor.http.contentType
-import io.ktor.serialization.kotlinx.json.json
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
-import kotlinx.serialization.json.Json
 
 class LocalTtsException(message: String) : Exception(message)
 
 object LocalTtsApi {
     private const val CHUNK_LIMIT = 240
 
-    private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
-
-    private val client = HttpClient(CIO) {
-        install(ContentNegotiation) {
-            json(json)
-        }
-    }
+    private val json = HttpClientProvider.jsonInstance
+    private val client = HttpClientProvider.defaultClient
 
     suspend fun checkHealth(baseUrl: String): Boolean {
         val root = baseUrl.trimEnd('/')
@@ -52,14 +42,14 @@ object LocalTtsApi {
     ): Flow<SynthesisResult> = flow {
         val chunks = SynthesisChunking.splitText(text, CHUNK_LIMIT)
         if (chunks.size == 1) {
-            emit(SynthesisResult.InProgress("Локальный синтез..."))
+            emit(SynthesisResult.InProgress("Local synthesis..."))
             val bytes = synthesizeChunk(chunks[0], speaker, settings, speed, pitchShift, outputFormat)
             emit(SynthesisResult.Done(bytes))
             return@flow
         }
         val parts = ArrayList<ByteArray>(chunks.size)
         for ((i, chunk) in chunks.withIndex()) {
-            emit(SynthesisResult.InProgress("Локальный синтез: чанк ${i + 1} из ${chunks.size}"))
+            emit(SynthesisResult.InProgress("Local synthesis: chunk ${i + 1} of ${chunks.size}"))
             parts.add(synthesizeChunk(chunk, speaker, settings, speed, pitchShift, outputFormat))
         }
         val merged =
@@ -80,6 +70,8 @@ object LocalTtsApi {
         outputFormat: String,
     ): ByteArray {
         val url = settings.baseUrl.trimEnd('/') + "/synthesize"
+        println("[LocalTts] -> POST $url (text=${text.length} chars, speaker=$speaker, format=$outputFormat)")
+        val startTime = System.currentTimeMillis()
         val response = client.post(url) {
             contentType(ContentType.Application.Json)
             setBody(
@@ -94,12 +86,15 @@ object LocalTtsApi {
                 ),
             )
         }
+        val elapsed = System.currentTimeMillis() - startTime
+        println("[LocalTts] <- HTTP ${response.status.value} (${elapsed}ms)")
+
         if (response.status != HttpStatusCode.OK) {
             val err = runCatching { response.bodyAsText() }.getOrElse { response.status.description }
-            throw LocalTtsException("Локальный TTS ${response.status.value}: $err")
+            throw LocalTtsException("Local TTS ${response.status.value}: $err")
         }
         val bytes = response.readRawBytes()
-        if (bytes.isEmpty()) throw LocalTtsException("Пустой ответ локального TTS")
+        if (bytes.isEmpty()) throw LocalTtsException("Empty response from local TTS")
         return bytes
     }
 }

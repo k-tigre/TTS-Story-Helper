@@ -2,16 +2,11 @@ package by.tigre.speechhelper.data
 
 import by.tigre.speechhelper.domain.LlmConfig
 import by.tigre.speechhelper.domain.LlmProvider
-import io.ktor.client.HttpClient
-import io.ktor.client.engine.cio.CIO
-import io.ktor.client.plugins.contentnegotiation.ContentNegotiation
 import io.ktor.client.request.get
 import io.ktor.client.request.header
 import io.ktor.client.statement.bodyAsText
 import io.ktor.http.HttpHeaders
-import io.ktor.serialization.kotlinx.json.json
 import kotlinx.serialization.Serializable
-import kotlinx.serialization.json.Json
 
 @Serializable
 private data class ModelsResponse(val data: List<ModelItem>)
@@ -29,32 +24,32 @@ object LlmModelsApi {
         "llama-lite",
     )
 
-    private val json = Json { ignoreUnknownKeys = true }
-
-    private val client = HttpClient(CIO) {
-        engine { requestTimeout = 15_000 }
-        install(ContentNegotiation) { json(this@LlmModelsApi.json) }
-    }
+    private val json = HttpClientProvider.jsonInstance
+    private val client = HttpClientProvider.defaultClient
 
     /**
      * Fetches available models from an OpenAI-compatible /models endpoint.
      * For [LlmProvider.YandexCloud] returns [YANDEX_MODELS] without an HTTP call.
      *
      * @param config current LLM configuration (provider, baseUrl, apiKey)
-     * @param folderId Yandex Cloud folder ID (used only for YandexCloud provider)
      * @return sorted list of model IDs
      */
-    suspend fun fetchModels(config: LlmConfig, folderId: String = ""): List<String> {
+    suspend fun fetchModels(config: LlmConfig): List<String> {
         if (config.provider == LlmProvider.YandexCloud) {
             return YANDEX_MODELS
         }
 
         val endpoint = config.baseUrl.trimEnd('/') + "/models"
+        println("[LlmModelsApi] -> GET $endpoint")
+        val startTime = System.currentTimeMillis()
         val response = client.get(endpoint) {
             if (config.apiKey.isNotBlank()) {
                 header(HttpHeaders.Authorization, "Bearer ${config.apiKey}")
             }
         }
+        val elapsed = System.currentTimeMillis() - startTime
+
+        println("[LlmModelsApi] <- HTTP ${response.status.value} (${elapsed}ms)")
 
         val body = response.bodyAsText()
         val parsed = json.decodeFromString<ModelsResponse>(body)
