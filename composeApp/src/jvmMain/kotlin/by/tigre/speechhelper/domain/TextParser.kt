@@ -350,4 +350,79 @@ object TextParser {
             }
         }
     }
+
+    /**
+     * После авто-разметки: фрагменты только с паузами `<[…]>` между блоками `[voice]…[/voice]`
+     * оказываются без голоса и дают «тихую» паузу в TTS — переносим их внутрь соседнего голоса
+     * (предпочтительно следующего). Затем склеиваем подряд идущие сегменты с одним именем голоса.
+     */
+    fun normalizeMarkupAfterAi(input: String): String {
+        if (input.isBlank()) return input
+        val segs = parse(input).toMutableList()
+
+        var i = 0
+        while (i < segs.size) {
+            val s = segs[i]
+            if (s.voiceName != null || !isUnvoicedPauseOrWhitespaceOnly(s.text)) {
+                i++
+                continue
+            }
+            val mergedIntoNext = i + 1 < segs.size && segs[i + 1].voiceName != null
+            val mergedIntoPrev = i > 0 && segs[i - 1].voiceName != null
+            when {
+                mergedIntoNext -> {
+                    val n = segs[i + 1]
+                    val p = s.text.trim()
+                    segs[i + 1] = n.copy(
+                        text = when {
+                            p.isEmpty() -> n.text.trim()
+                            n.text.isBlank() -> p
+                            else -> "$p\n\n${n.text.trim()}"
+                        },
+                    )
+                    segs.removeAt(i)
+                }
+                mergedIntoPrev -> {
+                    val p = segs[i - 1]
+                    val t = s.text.trim()
+                    segs[i - 1] = p.copy(
+                        text = when {
+                            t.isEmpty() -> p.text.trim()
+                            p.text.isBlank() -> t
+                            else -> "${p.text.trim()}\n\n$t"
+                        },
+                    )
+                    segs.removeAt(i)
+                }
+                else -> i++
+            }
+        }
+
+        if (segs.isEmpty()) return input.trim()
+
+        val mergedVoices = mutableListOf<TextSegment>()
+        for (seg in segs) {
+            val last = mergedVoices.lastOrNull()
+            if (last != null && last.voiceName != null && seg.voiceName == last.voiceName) {
+                val a = last.text.trim()
+                val b = seg.text.trim()
+                mergedVoices[mergedVoices.lastIndex] = last.copy(
+                    text = when {
+                        a.isEmpty() -> b
+                        b.isEmpty() -> a
+                        else -> "$a\n\n$b"
+                    },
+                )
+            } else {
+                mergedVoices.add(seg)
+            }
+        }
+        return buildText(mergedVoices)
+    }
+
+    /** Сегмент без голоса, в котором после снятия разметки не остаётся текста (только паузы и пробелы). */
+    private fun isUnvoicedPauseOrWhitespaceOnly(raw: String): Boolean {
+        if (raw.isBlank()) return true
+        return stripMarkup(raw).isBlank()
+    }
 }

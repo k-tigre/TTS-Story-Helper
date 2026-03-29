@@ -10,6 +10,7 @@ import io.ktor.http.HttpStatusCode
 import io.ktor.http.contentType
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
+import by.tigre.speechhelper.domain.TextParser
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 
@@ -70,7 +71,7 @@ object AiMarkupApi {
                     ChatMessage(role = "user", content = chunk),
                 ),
             )
-            results.add(fixMalformedTags(result.replace("```", "")))
+            results.add(postProcessAiMarkup(result.replace("```", "")))
         }
         println("[AiFixDialog] All chunks processed")
         emit(MarkupResult.Done(results.joinToString("\n")))
@@ -142,7 +143,7 @@ object AiMarkupApi {
 //        println("[AiMarkup] Pass 2 done (${finalResult.length} chars)")
 //        return finalResult.replace("```", "")
 
-        return fixMalformedTags(firstResult.replace("```", ""))
+        return postProcessAiMarkup(firstResult.replace("```", ""))
     }
 
     /**
@@ -162,6 +163,9 @@ object AiMarkupApi {
                 }
             }
     }
+
+    internal fun postProcessAiMarkup(text: String): String =
+        TextParser.normalizeMarkupAfterAi(fixMalformedTags(text))
 
     private suspend fun sendChat(
         model: String,

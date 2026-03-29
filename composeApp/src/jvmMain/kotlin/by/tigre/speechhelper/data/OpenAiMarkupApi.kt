@@ -94,7 +94,7 @@ object OpenAiMarkupApi {
                     OaiChatMessage(role = "user", content = chunk),
                 ),
             )
-            results.add(AiMarkupApi.fixMalformedTags(result.replace("```", "")))
+            results.add(AiMarkupApi.postProcessAiMarkup(result.replace("```", "")))
         }
         emit(MarkupResult.Done(results.joinToString("\n")))
     }
@@ -113,7 +113,7 @@ object OpenAiMarkupApi {
             ),
         )
         println("[OpenAiMarkup] Received ${result.length} chars")
-        return AiMarkupApi.fixMalformedTags(result.replace("```", ""))
+        return AiMarkupApi.postProcessAiMarkup(result.replace("```", ""))
     }
 
     private suspend fun sendChat(
@@ -132,7 +132,7 @@ object OpenAiMarkupApi {
         val request = OaiChatRequest(
             model = resolvedModel,
             messages = messages,
-            temperature = 0.5,
+            temperature = 0.2,
         )
 
         val totalChars = messages.sumOf { it.content.length }
