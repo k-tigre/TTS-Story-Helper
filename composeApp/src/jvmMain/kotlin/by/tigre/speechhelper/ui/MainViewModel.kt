@@ -40,6 +40,13 @@ import java.io.File
 import javax.swing.JFileChooser
 import javax.swing.filechooser.FileNameExtensionFilter
 
+/** Фильтр списка сегментов в режиме «Разбивка». */
+sealed class SegmentViewVoiceFilter {
+    data object All : SegmentViewVoiceFilter()
+    data class Only(val voiceName: String) : SegmentViewVoiceFilter()
+    data object Unvoiced : SegmentViewVoiceFilter()
+}
+
 class MainViewModel(private val scope: CoroutineScope) {
 
     // Chapter management
@@ -98,6 +105,8 @@ class MainViewModel(private val scope: CoroutineScope) {
     var markupModeEnabled by mutableStateOf(false)
     private var textHadOriginalMarkup = false
     val segments = mutableStateListOf<TextSegment>()
+
+    var segmentViewVoiceFilter by mutableStateOf<SegmentViewVoiceFilter>(SegmentViewVoiceFilter.All)
 
     // Dialog visibility
     var showCreateDialog by mutableStateOf(false)
@@ -195,6 +204,7 @@ class MainViewModel(private val scope: CoroutineScope) {
         statusMessage = ""
         markupModeEnabled = originalText.isNotBlank() && hasMarkers
         ensureVoiceMain()
+        segmentViewVoiceFilter = SegmentViewVoiceFilter.All
         revalidate()
         chapters = SessionStorage.listChapters()
     }
@@ -221,6 +231,7 @@ class MainViewModel(private val scope: CoroutineScope) {
         text = SessionStorage.getChapterText(newId)
         originalText = SessionStorage.getOriginalText(newId)
         chapterAudioPath = SessionStorage.getChapterAudioPath(newId)
+        segmentViewVoiceFilter = SegmentViewVoiceFilter.All
         showDeleteDialog = false
     }
 
@@ -237,6 +248,7 @@ class MainViewModel(private val scope: CoroutineScope) {
         currentBookName = ""
         synthesisBackend = SessionStorage.synthesisBackend
         localTtsSettings = SessionStorage.localTtsSettings
+        segmentViewVoiceFilter = SegmentViewVoiceFilter.All
         statusMessage = "Всё очищено"
         showClearAllDialog = false
     }
@@ -277,6 +289,7 @@ class MainViewModel(private val scope: CoroutineScope) {
             voiceMapping.putAll(SessionStorage.voiceMapping)
             currentBookName = bookName
             SessionStorage.currentBookName = bookName
+            segmentViewVoiceFilter = SegmentViewVoiceFilter.All
             statusMessage = "Книга \"$bookName\" загружена"
         } else {
             statusMessage = "Ошибка: не удалось загрузить книгу"
@@ -345,6 +358,7 @@ class MainViewModel(private val scope: CoroutineScope) {
             voiceMapping.clear()
             currentBookName = book.title
             SessionStorage.currentBookName = book.title
+            segmentViewVoiceFilter = SegmentViewVoiceFilter.All
             statusMessage = "Импортировано: \"${book.title}\" (${book.chapters.size} глав)"
         } catch (e: Exception) {
             statusMessage = "Ошибка импорта $label: ${e.message}"
@@ -498,10 +512,17 @@ class MainViewModel(private val scope: CoroutineScope) {
     }
 
     fun mergeVoice(fromName: String, toName: String) {
-        text = text
-            .replace("[$fromName]", "[$toName]")
-            .replace("[/$fromName]", "[/$toName]")
+        fun applyVoiceRename(raw: String): String =
+            raw.replace("[$fromName]", "[$toName]").replace("[/$fromName]", "[/$toName]")
+
+        text = applyVoiceRename(text)
         saveCurrentChapter()
+        for (ch in SessionStorage.listChapters()) {
+            if (ch.id == currentChapterId) continue
+            val t = SessionStorage.getChapterText(ch.id)
+            val updated = applyVoiceRename(t)
+            if (updated != t) SessionStorage.setChapterText(ch.id, updated)
+        }
         if (viewMode == 1) {
             for (i in segments.indices) {
                 if (segments[i].voiceName == fromName) {
@@ -509,16 +530,44 @@ class MainViewModel(private val scope: CoroutineScope) {
                 }
             }
         }
+        val voiceFilter = segmentViewVoiceFilter
+        if (voiceFilter is SegmentViewVoiceFilter.Only && voiceFilter.voiceName == fromName) {
+            segmentViewVoiceFilter = SegmentViewVoiceFilter.Only(toName)
+        }
         voiceMapping.remove(fromName)
         if (toName !in voiceMapping) voiceMapping[toName] = VoiceSettings()
         saveVoiceMapping()
-        statusMessage = "Голос \"$fromName\" объединён с \"$toName\""
+        statusMessage = "Голос \"$fromName\" объединён с \"$toName\" во всех главах"
     }
 
     // ── Segments ──────────────────────────────────────────────────────────────
 
     fun syncTextFromSegments() {
         text = TextParser.buildText(segments.toList())
+    }
+
+    fun mergeSegmentWithPrevious(index: Int) {
+        if (index <= 0 || index >= segments.size) return
+        val prev = segments[index - 1]
+        val curr = segments[index]
+        segments[index - 1] = prev.copy(text = joinMergedSegmentTexts(prev.text, curr.text))
+        segments.removeAt(index)
+        syncTextFromSegments()
+        saveCurrentChapter()
+        revalidate()
+        statusMessage = "Сегмент объединён с предыдущим"
+    }
+
+    fun mergeSegmentWithNext(index: Int) {
+        if (index < 0 || index >= segments.size - 1) return
+        val curr = segments[index]
+        val next = segments[index + 1]
+        segments[index] = curr.copy(text = joinMergedSegmentTexts(curr.text, next.text))
+        segments.removeAt(index + 1)
+        syncTextFromSegments()
+        saveCurrentChapter()
+        revalidate()
+        statusMessage = "Сегмент объединён со следующим"
     }
 
     fun resetMarkup() {
@@ -658,6 +707,150 @@ class MainViewModel(private val scope: CoroutineScope) {
         }
     }
 
+    private data class MultiVoiceSynthResult(
+        val savedPath: String?,
+        val segmentCount: Int,
+        val partsMerged: Int,
+        val segmentErrors: List<String>,
+    )
+
+    /**
+     * Синтез многоголосой главы по тексту из хранилища (кэш частей, склейка, сохранение файла).
+     * [progressContext] — префикс для [progressMessage] (например, номер главы в пакете).
+     */
+    private suspend fun synthesizeMultiVoiceForStoredChapter(
+        chapterId: String,
+        chapterText: String,
+        retryVoice: String?,
+        progressContext: String,
+    ): MultiVoiceSynthResult {
+        fun pushProgress(inner: String) {
+            progressMessage =
+                if (progressContext.isNotBlank()) "$progressContext\n$inner" else inner
+        }
+
+        if (!TextParser.hasVoiceMarkers(chapterText)) {
+            val trimmed = chapterText.trim()
+            if (trimmed.isEmpty()) {
+                return MultiVoiceSynthResult(null, 0, 0, listOf("пустой текст"))
+            }
+            val settings = voiceMapping["voice_main"] ?: VoiceSettings()
+            val outputFormat = if (synthesisBackend == SynthesisBackend.Local) selectedFormat else "mp3"
+            var savedPath: String? = null
+            val errors = mutableListOf<String>()
+            try {
+                SpeechSynthesizer.synthesize(
+                    text = chapterText,
+                    voiceSettings = settings,
+                    outputFormat = outputFormat,
+                    backend = synthesisBackend,
+                    localSettings = localTtsSettings,
+                    cloudToken = TokenStorage.iamToken,
+                ).collectLatest { result ->
+                    when (result) {
+                        is SynthesisResult.InProgress ->
+                            pushProgress(
+                                "Синтез речи\nголос: ${settings.voice}\n${result.message}",
+                            )
+                        is SynthesisResult.Done -> {
+                            val chapterName = chapters.find { it.id == chapterId }?.name ?: ""
+                            val path = saveAudioFile(result.bytes, outputFormat, currentBookName, chapterName)
+                            SessionStorage.setChapterAudioPath(chapterId, path)
+                            if (chapterId == currentChapterId) {
+                                chapterAudioPath = path
+                            }
+                            savedPath = path
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                errors.add(e.message ?: "ошибка синтеза")
+            }
+            if (savedPath == null && errors.isEmpty()) {
+                errors.add("нет результата синтеза")
+            }
+            return MultiVoiceSynthResult(
+                savedPath = savedPath,
+                segmentCount = 1,
+                partsMerged = if (savedPath != null) 1 else 0,
+                segmentErrors = errors,
+            )
+        }
+
+        val segmentsList = TextParser.parse(chapterText)
+        if (segmentsList.isEmpty()) {
+            return MultiVoiceSynthResult(null, 0, 0, listOf("не найдены сегменты текста"))
+        }
+        val isLocal = synthesisBackend == SynthesisBackend.Local
+        val outputFormat = if (isLocal) selectedFormat else "mp3"
+        val partExt = outputFormat
+        val cacheDir = withContext(Dispatchers.IO) {
+            SessionStorage.getChapterCacheDir(chapterId)
+        }
+        val errors = mutableListOf<String>()
+
+        for ((index, segment) in segmentsList.withIndex()) {
+            val settings = if (segment.voiceName != null) {
+                voiceMapping[segment.voiceName] ?: VoiceSettings()
+            } else {
+                VoiceSettings()
+            }
+            val partFile = File(cacheDir, "part_%03d.$partExt".format(index))
+
+            if (partFile.exists() && (retryVoice == null || segment.voiceName != retryVoice)) {
+                pushProgress("Озвучивание ${index + 1} из ${segmentsList.size} — кэш")
+                continue
+            }
+
+            try {
+                SpeechSynthesizer.synthesize(
+                    text = segment.text,
+                    voiceSettings = settings,
+                    outputFormat = outputFormat,
+                    backend = synthesisBackend,
+                    localSettings = localTtsSettings,
+                    cloudToken = TokenStorage.iamToken,
+                ).collectLatest { result ->
+                    when (result) {
+                        is SynthesisResult.InProgress ->
+                            pushProgress(
+                                "Озвучивание ${index + 1} из ${segmentsList.size}\n" +
+                                    "голос: ${segment.voiceName ?: "по умолчанию"} → ${settings.voice}\n${result.message}",
+                            )
+                        is SynthesisResult.Done ->
+                            withContext(Dispatchers.IO) { partFile.writeBytes(result.bytes) }
+                    }
+                }
+            } catch (e: Exception) {
+                errors.add("#${index + 1} ${segment.voiceName ?: "по умолчанию"}: ${e.message}")
+                partFile.delete()
+            }
+        }
+
+        pushProgress("Склейка аудио\n${segmentsList.size} сегментов")
+        val allParts = (0 until segmentsList.size).mapNotNull { i ->
+            val f = File(cacheDir, "part_%03d.$partExt".format(i))
+            if (f.exists()) f.readBytes() else null
+        }
+
+        if (allParts.isEmpty()) {
+            return MultiVoiceSynthResult(null, segmentsList.size, 0, errors)
+        }
+        val combined =
+            if (outputFormat == "wav") {
+                WavMerge.merge(allParts)
+            } else {
+                allParts.reduce { acc, bytes -> acc + bytes }
+            }
+        val chapterName = chapters.find { it.id == chapterId }?.name ?: ""
+        val filePath = saveAudioFile(combined, outputFormat, currentBookName, chapterName)
+        SessionStorage.setChapterAudioPath(chapterId, filePath)
+        if (chapterId == currentChapterId) {
+            chapterAudioPath = filePath
+        }
+        return MultiVoiceSynthResult(filePath, segmentsList.size, allParts.size, errors)
+    }
+
     fun launchMultiVoiceSynthesis(retryVoice: String? = null) {
         val segmentsList = TextParser.parse(text)
         if (segmentsList.isEmpty()) {
@@ -669,76 +862,80 @@ class MainViewModel(private val scope: CoroutineScope) {
             isLoading = true
             statusMessage = ""
             progressMessage = ""
-            val isLocal = synthesisBackend == SynthesisBackend.Local
-            val outputFormat = if (isLocal) selectedFormat else "mp3"
-            val partExt = outputFormat
             try {
-                val cacheDir = withContext(Dispatchers.IO) {
-                    SessionStorage.getChapterCacheDir(currentChapterId)
-                }
-                val errors = mutableListOf<String>()
-
-                for ((index, segment) in segmentsList.withIndex()) {
-                    val settings = if (segment.voiceName != null) {
-                        voiceMapping[segment.voiceName] ?: VoiceSettings()
-                    } else {
-                        VoiceSettings()
+                val r = synthesizeMultiVoiceForStoredChapter(
+                    chapterId = currentChapterId,
+                    chapterText = text,
+                    retryVoice = retryVoice,
+                    progressContext = "",
+                )
+                if (r.savedPath == null) {
+                    statusMessage = when {
+                        r.segmentCount == 0 -> "Ошибка: не найдены сегменты текста"
+                        r.partsMerged == 0 -> "Ошибка: ни один сегмент не озвучен"
+                        else -> "Ошибка озвучки"
                     }
-                    val partFile = File(cacheDir, "part_%03d.$partExt".format(index))
-
-                    if (partFile.exists() && (retryVoice == null || segment.voiceName != retryVoice)) {
-                        progressMessage = "Озвучивание ${index + 1} из ${segmentsList.size} — кэш"
-                        continue
-                    }
-
-                    try {
-                        SpeechSynthesizer.synthesize(
-                            text = segment.text,
-                            voiceSettings = settings,
-                            outputFormat = outputFormat,
-                            backend = synthesisBackend,
-                            localSettings = localTtsSettings,
-                            cloudToken = TokenStorage.iamToken,
-                        ).collectLatest { result ->
-                            when (result) {
-                                is SynthesisResult.InProgress ->
-                                    progressMessage = "Озвучивание ${index + 1} из ${segmentsList.size}\n" +
-                                            "голос: ${segment.voiceName ?: "по умолчанию"} → ${settings.voice}\n${result.message}"
-                                is SynthesisResult.Done ->
-                                    withContext(Dispatchers.IO) { partFile.writeBytes(result.bytes) }
-                            }
-                        }
-                    } catch (e: Exception) {
-                        errors.add("#${index + 1} ${segment.voiceName ?: "по умолчанию"}: ${e.message}")
-                        partFile.delete()
-                    }
-                }
-
-                progressMessage = "Склейка аудио\n${segmentsList.size} сегментов"
-                val allParts = (0 until segmentsList.size).mapNotNull { i ->
-                    val f = File(cacheDir, "part_%03d.$partExt".format(i))
-                    if (f.exists()) f.readBytes() else null
-                }
-
-                if (allParts.isEmpty()) {
-                    statusMessage = "Ошибка: ни один сегмент не озвучен"
                 } else {
-                    val combined =
-                        if (outputFormat == "wav") {
-                            WavMerge.merge(allParts)
-                        } else {
-                            allParts.reduce { acc, bytes -> acc + bytes }
-                        }
-                    val chapterName = chapters.find { it.id == currentChapterId }?.name ?: ""
-                    val filePath = saveAudioFile(combined, outputFormat, currentBookName, chapterName)
-                    SessionStorage.setChapterAudioPath(currentChapterId, filePath)
-                    chapterAudioPath = filePath
-                    statusMessage = if (errors.isEmpty()) {
-                        "Сохранено (${allParts.size} сегментов): $filePath"
+                    statusMessage = if (r.segmentErrors.isEmpty()) {
+                        "Сохранено (${r.partsMerged} сегментов): ${r.savedPath}"
                     } else {
-                        "Сохранено (${allParts.size}/${segmentsList.size}): $filePath\nОшибки:\n${errors.joinToString("\n")}"
+                        "Сохранено (${r.partsMerged}/${r.segmentCount}): ${r.savedPath}\nОшибки:\n" +
+                            r.segmentErrors.joinToString("\n")
                     }
                 }
+            } finally {
+                isLoading = false
+                progressMessage = ""
+            }
+        }
+    }
+
+    fun launchBatchSynthesisForChapters(chapterIds: List<String>) {
+        val distinct = chapterIds.distinct().filter { SessionStorage.getChapterText(it).isNotBlank() }
+        if (distinct.isEmpty() || isLoading) return
+        saveVoiceMapping()
+        scope.launch {
+            isLoading = true
+            statusMessage = ""
+            progressMessage = ""
+            try {
+                saveCurrentChapter()
+                refreshChapters()
+                val lines = mutableListOf<String>()
+                var ok = 0
+                for ((idx, id) in distinct.withIndex()) {
+                    val label = chapters.find { it.id == id }?.name ?: id
+                    val t = SessionStorage.getChapterText(id)
+                    val ctx = "Пакетная озвучка: глава ${idx + 1} из ${distinct.size} — $label"
+                    val r = synthesizeMultiVoiceForStoredChapter(
+                        chapterId = id,
+                        chapterText = t,
+                        retryVoice = null,
+                        progressContext = ctx,
+                    )
+                    when {
+                        r.savedPath == null ->
+                            lines.add(
+                                "$label: " + r.segmentErrors.firstOrNull()
+                                    .orEmpty().ifBlank { "не удалось сохранить аудио" },
+                            )
+                        r.segmentErrors.isNotEmpty() -> {
+                            ok++
+                            lines.add("$label: сохранено с ошибками сегментов\n${r.segmentErrors.joinToString("\n")}")
+                        }
+                        else -> ok++
+                    }
+                }
+                statusMessage = buildString {
+                    append("Пакетная озвучка: готово $ok из ${distinct.size}")
+                    if (lines.isNotEmpty()) {
+                        append("\n")
+                        append(lines.joinToString("\n"))
+                    }
+                }
+            } catch (e: Exception) {
+                statusMessage = "Пакетная озвучка: ${e.message}"
+                e.printStackTrace()
             } finally {
                 isLoading = false
                 progressMessage = ""
@@ -994,6 +1191,16 @@ class MainViewModel(private val scope: CoroutineScope) {
 }
 
 // ── Audio file utility ────────────────────────────────────────────────────────
+
+private fun joinMergedSegmentTexts(a: String, b: String): String {
+    val x = a.trim()
+    val y = b.trim()
+    return when {
+        x.isEmpty() -> y
+        y.isEmpty() -> x
+        else -> "$x\n\n$y"
+    }
+}
 
 private fun sanitizeAudioFileNamePart(s: String): String =
     s.replace(Regex("[^\\w\\s\\-()\\[\\]а-яА-ЯёЁ]"), "_").trim()

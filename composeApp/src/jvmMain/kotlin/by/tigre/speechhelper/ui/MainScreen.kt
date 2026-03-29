@@ -485,8 +485,10 @@ fun MainScreen() {
                     }
                 } else {
                     SegmentsView(
-                        segments = vm.segments,
+                        segments = vm.segments.toList(),
                         voiceMapping = vm.voiceMapping,
+                        voiceListFilter = vm.segmentViewVoiceFilter,
+                        onVoiceListFilterChange = { vm.segmentViewVoiceFilter = it },
                         synthesizeAudio = { t, s -> vm.synthesizeAudio(t, s, "wav") },
                         onSegmentTextChange = { index, newText ->
                             vm.segments[index] = vm.segments[index].copy(text = newText)
@@ -496,6 +498,8 @@ fun MainScreen() {
                             vm.segments.removeAt(index)
                             vm.segments.addAll(index, parts.map { TextSegment(voiceName = voiceName, text = it) })
                         },
+                        onMergeWithPrevious = { vm.mergeSegmentWithPrevious(it) },
+                        onMergeWithNext = { vm.mergeSegmentWithNext(it) },
                         onRemarkupSegment = { vm.remarkupSegment(it) },
                         onChangeSegmentVoice = { index, newVoiceName ->
                             vm.segments[index] = vm.segments[index].copy(voiceName = newVoiceName)
