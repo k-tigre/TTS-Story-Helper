@@ -709,7 +709,14 @@ fun MainScreen() {
         }
 
         if (vm.isLoading) {
-            ProgressDialog(progressMessage = vm.progressMessage)
+            ProgressDialog(
+                progressMessage = vm.progressMessage,
+                onCancel = if (vm.progressCancellable) {
+                    { vm.cancelMarkupProgress() }
+                } else {
+                    null
+                },
+            )
         }
     }
 }

@@ -28,7 +28,9 @@ import by.tigre.speechhelper.domain.TextSegment
 import by.tigre.speechhelper.domain.ChapterInfo
 import by.tigre.speechhelper.domain.ValidationResult
 import by.tigre.speechhelper.domain.VoiceSettings
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.collectLatest
@@ -67,6 +69,14 @@ class MainViewModel(private val scope: CoroutineScope) {
         private set
     var progressMessage by mutableStateOf("")
         private set
+    var progressCancellable by mutableStateOf(false)
+        private set
+
+    private var markupProgressJob: Job? = null
+
+    fun cancelMarkupProgress() {
+        markupProgressJob?.cancel()
+    }
     var statusMessage by mutableStateOf("")
 
     // Audio path
@@ -763,10 +773,12 @@ class MainViewModel(private val scope: CoroutineScope) {
 
     private fun executeAutoMarkupForChapters(chapterIds: List<String>) {
         if (chapterIds.isEmpty() || isLoading) return
+        markupProgressJob?.cancel()
         isLoading = true
+        progressCancellable = true
         progressMessage = "Авто-разметка..."
         statusMessage = ""
-        scope.launch {
+        markupProgressJob = scope.launch {
             try {
                 saveCurrentChapter()
                 val errors = mutableListOf<String>()
@@ -797,6 +809,8 @@ class MainViewModel(private val scope: CoroutineScope) {
                                 }
                             }
                         }
+                    } catch (e: CancellationException) {
+                        throw e
                     } catch (e: Exception) {
                         val label = chapters.find { it.id == id }?.name ?: id
                         errors.add("$label: ${e.message}")
@@ -810,12 +824,17 @@ class MainViewModel(private val scope: CoroutineScope) {
                     else ->
                         "Авто-разметка: есть ошибки (${errors.size})\n${errors.joinToString("\n")}"
                 }
+            } catch (e: CancellationException) {
+                statusMessage = "Авто-разметка отменена"
+                throw e
             } catch (e: Exception) {
                 statusMessage = "Ошибка авто-разметки: ${e.message}"
                 e.printStackTrace()
             } finally {
+                progressCancellable = false
                 isLoading = false
                 progressMessage = ""
+                markupProgressJob = null
             }
         }
     }
@@ -829,10 +848,12 @@ class MainViewModel(private val scope: CoroutineScope) {
 
     private fun launchAutoMarkupWithLlm(config: LlmConfig, chapterIds: List<String>) {
         if (chapterIds.isEmpty() || isLoading) return
+        markupProgressJob?.cancel()
         isLoading = true
+        progressCancellable = true
         progressMessage = "Авто-разметка (${config.model})..."
         statusMessage = ""
-        scope.launch {
+        markupProgressJob = scope.launch {
             try {
                 saveCurrentChapter()
                 val errors = mutableListOf<String>()
@@ -862,6 +883,8 @@ class MainViewModel(private val scope: CoroutineScope) {
                                 }
                             }
                         }
+                    } catch (e: CancellationException) {
+                        throw e
                     } catch (e: Exception) {
                         val label = chapters.find { it.id == id }?.name ?: id
                         errors.add("$label: ${e.message}")
@@ -875,12 +898,17 @@ class MainViewModel(private val scope: CoroutineScope) {
                     else ->
                         "Авто-разметка: есть ошибки (${errors.size})\n${errors.joinToString("\n")}"
                 }
+            } catch (e: CancellationException) {
+                statusMessage = "Авто-разметка отменена"
+                throw e
             } catch (e: Exception) {
                 statusMessage = "Ошибка авто-разметки: ${e.message}"
                 e.printStackTrace()
             } finally {
+                progressCancellable = false
                 isLoading = false
                 progressMessage = ""
+                markupProgressJob = null
             }
         }
     }
@@ -898,8 +926,11 @@ class MainViewModel(private val scope: CoroutineScope) {
             }
             AiMarkupApi.fixDialog(text = segments[index].text, token = TokenStorage.iamToken, folderId = folderId)
         }
+        markupProgressJob?.cancel()
         isLoading = true
-        scope.launch {
+        progressCancellable = true
+        progressMessage = "Исправление диалогов сегмента ${index + 1}..."
+        markupProgressJob = scope.launch {
             try {
                 markupFlow.collectLatest { result ->
                     when (result) {
@@ -921,12 +952,17 @@ class MainViewModel(private val scope: CoroutineScope) {
                         }
                     }
                 }
+            } catch (e: CancellationException) {
+                statusMessage = "Переразметка отменена"
+                throw e
             } catch (e: Exception) {
                 statusMessage = "Ошибка переразметки: ${e.message}"
                 e.printStackTrace()
             } finally {
+                progressCancellable = false
                 isLoading = false
                 progressMessage = ""
+                markupProgressJob = null
             }
         }
     }

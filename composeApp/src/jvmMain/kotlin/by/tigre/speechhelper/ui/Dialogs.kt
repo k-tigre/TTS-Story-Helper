@@ -524,7 +524,10 @@ fun LoadBookDialog(
 }
 
 @Composable
-fun ProgressDialog(progressMessage: String) {
+fun ProgressDialog(
+    progressMessage: String,
+    onCancel: (() -> Unit)? = null,
+) {
     Dialog(onDismissRequest = {}) {
         Surface(
             shape = RoundedCornerShape(16.dp),
@@ -543,6 +546,11 @@ fun ProgressDialog(progressMessage: String) {
                         style = MaterialTheme.typography.bodyMedium,
                         textAlign = TextAlign.Center,
                     )
+                }
+                if (onCancel != null) {
+                    TextButton(onClick = onCancel) {
+                        Text("Отмена")
+                    }
                 }
             }
         }
