@@ -17,7 +17,7 @@ object HttpClientProvider {
     val markupClient: HttpClient by lazy {
         HttpClient(CIO) {
             engine {
-                requestTimeout = 360_000
+                requestTimeout = 420_000
             }
             install(ContentNegotiation) {
                 json(this@HttpClientProvider.json)
