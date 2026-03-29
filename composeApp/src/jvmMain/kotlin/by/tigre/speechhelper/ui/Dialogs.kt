@@ -614,6 +614,7 @@ fun ChaptersWorkflowDialog(
     isLoading: Boolean,
     onDismiss: () -> Unit,
     onLaunchBatchMarkup: (List<String>) -> Unit,
+    onLaunchBatchSynthesis: (List<String>) -> Unit,
     onSetMarkupDone: (String, Boolean) -> Unit,
     onSetVoiceDone: (String, Boolean) -> Unit,
     audioExists: (String) -> Boolean,
@@ -626,7 +627,8 @@ fun ChaptersWorkflowDialog(
         text = {
             Column(modifier = Modifier.heightIn(max = 420.dp)) {
                 Text(
-                    "Отметьте галочками главы для пакетной авто-разметки. " +
+                    "Отметьте галочками главы для пакетной авто-разметки или пакетной озвучки " +
+                        "(как кнопка «Озвучить»: с разметкой — по сегментам и голосам, без — целиком). " +
                         "Чипы «Разметка» и «Озвучка» — ваши ручные отметки прогресса.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -689,11 +691,19 @@ fun ChaptersWorkflowDialog(
             }
         },
         confirmButton = {
-            Button(
-                onClick = { onLaunchBatchMarkup(selectedIds.toList()) },
-                enabled = selectedIds.isNotEmpty() && !isLoading,
-            ) {
-                Text("Авто-разметка выбранных")
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(
+                    onClick = { onLaunchBatchMarkup(selectedIds.toList()) },
+                    enabled = selectedIds.isNotEmpty() && !isLoading,
+                ) {
+                    Text("Авто-разметка")
+                }
+                Button(
+                    onClick = { onLaunchBatchSynthesis(selectedIds.toList()) },
+                    enabled = selectedIds.isNotEmpty() && !isLoading,
+                ) {
+                    Text("Озвучить выбранные")
+                }
             }
         },
         dismissButton = {

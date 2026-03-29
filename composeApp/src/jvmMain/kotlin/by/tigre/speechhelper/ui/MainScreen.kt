@@ -242,6 +242,14 @@ fun MainScreen() {
                     vm.showChaptersWorkflowDialog = false
                 }
             },
+            onLaunchBatchSynthesis = { ids ->
+                if (vm.synthesisBackend == SynthesisBackend.Cloud && !TokenStorage.hasCredentials()) {
+                    showTokenDialog = true
+                } else {
+                    vm.launchBatchSynthesisForChapters(ids)
+                    vm.showChaptersWorkflowDialog = false
+                }
+            },
             onSetMarkupDone = { id, done -> vm.setChapterMarkupDoneFlag(id, done) },
             onSetVoiceDone = { id, done -> vm.setChapterVoiceDoneFlag(id, done) },
             audioExists = { vm.audioFileExistsForChapter(it) },
