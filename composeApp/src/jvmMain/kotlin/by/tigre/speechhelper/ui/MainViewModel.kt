@@ -25,6 +25,7 @@ import by.tigre.speechhelper.domain.LocalTtsSettings
 import by.tigre.speechhelper.domain.SynthesisBackend
 import by.tigre.speechhelper.domain.TextParser
 import by.tigre.speechhelper.domain.TextSegment
+import by.tigre.speechhelper.domain.ChapterInfo
 import by.tigre.speechhelper.domain.ValidationResult
 import by.tigre.speechhelper.domain.VoiceSettings
 import kotlinx.coroutines.CoroutineScope
@@ -34,8 +35,6 @@ import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
-import java.time.LocalDateTime
-import java.time.format.DateTimeFormatter
 import javax.swing.JFileChooser
 import javax.swing.filechooser.FileNameExtensionFilter
 
@@ -101,6 +100,9 @@ class MainViewModel(private val scope: CoroutineScope) {
     var showResetMarkupDialog by mutableStateOf(false)
     var showHelpDialog by mutableStateOf(false)
     var showChaptersWorkflowDialog by mutableStateOf(false)
+    var showAudiobookExportBlockedDialog by mutableStateOf(false)
+    var audiobookExportBlockedRows by mutableStateOf<List<Pair<String, List<String>>>>(emptyList())
+        private set
 
     private var pendingMarkupChapterIds: List<String>? = null
 
@@ -356,6 +358,84 @@ class MainViewModel(private val scope: CoroutineScope) {
     fun audioFileExistsForChapter(id: String): Boolean {
         val p = SessionStorage.getChapterAudioPath(id) ?: return false
         return File(p).isFile
+    }
+
+    private fun chapterAudiobookExportIssues(ch: ChapterInfo): List<String> {
+        val issues = mutableListOf<String>()
+        if (!ch.markupDone) issues.add("не отмечена «Разметка готова»")
+        val hasAudio = audioFileExistsForChapter(ch.id)
+        if (!hasAudio) issues.add("нет файла озвучки")
+        if (hasAudio && !ch.voiceDone) issues.add("не отмечена «Озвучка готова»")
+        return issues
+    }
+
+    fun isAudiobookExportReady(): Boolean =
+        chapters.isNotEmpty() && chapters.all { chapterAudiobookExportIssues(it).isEmpty() }
+
+    fun dismissAudiobookExportBlockedDialog() {
+        showAudiobookExportBlockedDialog = false
+        audiobookExportBlockedRows = emptyList()
+    }
+
+    fun requestAudiobookExport() {
+        chapters = SessionStorage.listChapters()
+        if (chapters.isEmpty()) {
+            audiobookExportBlockedRows = listOf("Книга" to listOf("нет ни одной главы"))
+            showAudiobookExportBlockedDialog = true
+            return
+        }
+        val blocked = chapters.mapNotNull { ch ->
+            val issues = chapterAudiobookExportIssues(ch)
+            if (issues.isEmpty()) null else ch.name to issues
+        }
+        if (blocked.isNotEmpty()) {
+            audiobookExportBlockedRows = blocked
+            showAudiobookExportBlockedDialog = true
+            return
+        }
+        scope.launch { runAudiobookExport() }
+    }
+
+    private suspend fun runAudiobookExport() {
+        chapters = SessionStorage.listChapters()
+        val toExport = chapters.toList()
+        val parentDir = withContext(Dispatchers.IO) {
+            val chooser = JFileChooser().apply {
+                dialogTitle = "Выберите папку для экспорта аудиокниги"
+                fileSelectionMode = JFileChooser.DIRECTORIES_ONLY
+            }
+            if (chooser.showOpenDialog(null) == JFileChooser.APPROVE_OPTION) chooser.selectedFile else null
+        }
+        if (parentDir == null) return
+
+        val bookLabel = currentBookName.ifBlank { "Аудиокнига" }
+        val result = withContext(Dispatchers.IO) {
+            runCatching {
+                val folderName = sanitizeAudioFileNamePart(bookLabel).ifBlank { "Аудиокнига" }
+                val destRoot = File(parentDir, folderName)
+                destRoot.mkdirs()
+                if (!destRoot.isDirectory) {
+                    error("Не удалось создать папку: ${destRoot.absolutePath}")
+                }
+                val numWidth = maxOf(2, toExport.size.toString().length)
+                toExport.forEachIndexed { index, ch ->
+                    val srcPath = SessionStorage.getChapterAudioPath(ch.id)
+                        ?: error("Нет пути к аудио: ${ch.name}")
+                    val src = File(srcPath)
+                    if (!src.isFile) error("Нет файла озвучки: ${ch.name}")
+                    val ext = src.extension.ifBlank { "mp3" }
+                    val num = (index + 1).toString().padStart(numWidth, '0')
+                    val partName = sanitizeAudioFileNamePart(ch.name).ifBlank { "глава_${index + 1}" }
+                    val dest = File(destRoot, "$num - $partName.$ext")
+                    src.copyTo(dest, overwrite = true)
+                }
+                destRoot.absolutePath
+            }
+        }
+        statusMessage = result.fold(
+            onSuccess = { "Аудиокнига экспортирована: $it" },
+            onFailure = { "Ошибка экспорта: ${it.message ?: it.javaClass.simpleName}" },
+        )
     }
 
     fun setChapterMarkupDoneFlag(id: String, done: Boolean) {
@@ -879,6 +959,9 @@ class MainViewModel(private val scope: CoroutineScope) {
 
 // ── Audio file utility ────────────────────────────────────────────────────────
 
+private fun sanitizeAudioFileNamePart(s: String): String =
+    s.replace(Regex("[^\\w\\s\\-()\\[\\]а-яА-ЯёЁ]"), "_").trim()
+
 suspend fun saveAudioFile(
     bytes: ByteArray,
     format: String,
@@ -888,14 +971,12 @@ suspend fun saveAudioFile(
     val ext = if (format == "oggopus") "ogg" else format
     val dir = File(System.getProperty("user.home"), "SpeechHelper")
     dir.mkdirs()
-    val timestamp = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss"))
-    val safeName = { s: String -> s.replace(Regex("[^\\w\\s\\-()\\[\\]а-яА-ЯёЁ]"), "_").trim() }
     val nameParts = listOfNotNull(
-        bookName.takeIf { it.isNotBlank() }?.let { safeName(it) },
-        chapterName.takeIf { it.isNotBlank() }?.let { safeName(it) },
-        timestamp,
+        bookName.takeIf { it.isNotBlank() }?.let { sanitizeAudioFileNamePart(it) },
+        chapterName.takeIf { it.isNotBlank() }?.let { sanitizeAudioFileNamePart(it) },
     )
-    val file = File(dir, "${nameParts.joinToString(" - ")}.$ext")
+    val base = if (nameParts.isEmpty()) "audio" else nameParts.joinToString(" - ")
+    val file = File(dir, "$base.$ext")
     file.writeBytes(bytes)
     file.absolutePath
 }

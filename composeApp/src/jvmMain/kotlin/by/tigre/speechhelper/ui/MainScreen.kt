@@ -285,6 +285,40 @@ fun MainScreen() {
         )
     }
 
+    if (vm.showAudiobookExportBlockedDialog) {
+        val scrollState = rememberScrollState()
+        AlertDialog(
+            onDismissRequest = { vm.dismissAudiobookExportBlockedDialog() },
+            title = { Text("Аудиокнига ещё не готова") },
+            text = {
+                Column(Modifier.verticalScroll(scrollState)) {
+                    Text(
+                        "Чтобы экспортировать аудиокнигу, по каждой главе нужны: сохранённый файл озвучки и отмеченные флажки «Разметка готова» и «Озвучка готова». Сейчас не хватает:",
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                    Spacer(modifier = Modifier.height(12.dp))
+                    vm.audiobookExportBlockedRows.forEach { (chapterName, reasons) ->
+                        val line = buildString {
+                            append("• ")
+                            if (chapterName.isNotBlank()) {
+                                append("«")
+                                append(chapterName)
+                                append("»: ")
+                            }
+                            append(reasons.joinToString("; "))
+                        }
+                        Text(line, style = MaterialTheme.typography.bodyMedium)
+                        Spacer(modifier = Modifier.height(6.dp))
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { vm.dismissAudiobookExportBlockedDialog() }) {
+                    Text("Понятно")
+                }
+            },
+        )
+    }
 
     // ── Main layout ───────────────────────────────────────────────────────────
 
@@ -310,6 +344,12 @@ fun MainScreen() {
                     }
                 },
                 actions = {
+                    TextButton(
+                        onClick = { vm.requestAudiobookExport() },
+                        enabled = !vm.isLoading,
+                    ) {
+                        Text("Экспорт аудиокниги")
+                    }
                     TextButton(onClick = { vm.saveCurrentBook() }) {
                         Text("Сохранить книгу")
                     }
