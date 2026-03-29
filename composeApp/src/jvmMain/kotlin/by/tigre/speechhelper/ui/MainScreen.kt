@@ -256,6 +256,21 @@ fun MainScreen() {
         )
     }
 
+    if (vm.showAudiobookExportDialog) {
+        var exportSelectedIds by remember(vm.audiobookExportDialogKey) {
+            mutableStateOf(vm.defaultAudiobookExportSelection())
+        }
+        AudiobookExportDialog(
+            chapters = vm.chapters,
+            eligibilityIssues = { vm.chapterAudiobookExportEligibilityIssues(it) },
+            selectedIds = exportSelectedIds,
+            onSelectedIdsChange = { exportSelectedIds = it },
+            validationError = vm.audiobookExportValidationError,
+            onDismiss = { vm.dismissAudiobookExportDialog() },
+            onExport = { vm.submitAudiobookExport(it) },
+        )
+    }
+
     if (showTokenDialog) {
         TokenDialog(
             onDismiss = { showTokenDialog = false },

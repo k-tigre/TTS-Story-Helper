@@ -102,18 +102,25 @@ object SessionStorage {
         val dirs = chaptersDir.listFiles()?.filter { it.isDirectory }?.sortedBy { it.name } ?: emptyList()
         return dirs.map { d ->
             val name = File(d, "meta.txt").takeIf { it.exists() }?.readText()?.trim() ?: d.name
-            val (markupDone, voiceDone) = readChapterWorkflowFlags(d.name)
-            ChapterInfo(d.name, name, markupDone, voiceDone)
+            val w = readChapterWorkflowState(d.name)
+            ChapterInfo(d.name, name, w.markupDone, w.voiceDone, w.exported)
         }
     }
 
     private fun workflowFile(id: String) = File(chapterDir(id), "workflow.txt")
 
-    private fun readChapterWorkflowFlags(id: String): Pair<Boolean, Boolean> {
+    private data class ChapterWorkflowState(
+        val markupDone: Boolean = false,
+        val voiceDone: Boolean = false,
+        val exported: Boolean = false,
+    )
+
+    private fun readChapterWorkflowState(id: String): ChapterWorkflowState {
         val f = workflowFile(id)
-        if (!f.exists()) return false to false
+        if (!f.exists()) return ChapterWorkflowState()
         var markupDone = false
         var voiceDone = false
+        var exported = false
         for (line in f.readLines()) {
             val idx = line.indexOf('=')
             if (idx <= 0) continue
@@ -123,25 +130,40 @@ object SessionStorage {
             when (key) {
                 "markup_done" -> markupDone = truthy
                 "voice_done" -> voiceDone = truthy
+                "exported" -> exported = truthy
             }
         }
-        return markupDone to voiceDone
+        return ChapterWorkflowState(markupDone, voiceDone, exported)
     }
 
-    private fun writeChapterWorkflowFlags(id: String, markupDone: Boolean, voiceDone: Boolean) {
+    private fun writeChapterWorkflowState(id: String, state: ChapterWorkflowState) {
         workflowFile(id).writeText(
-            "markup_done=${if (markupDone) 1 else 0}\nvoice_done=${if (voiceDone) 1 else 0}\n",
+            "markup_done=${if (state.markupDone) 1 else 0}\n" +
+                "voice_done=${if (state.voiceDone) 1 else 0}\n" +
+                "exported=${if (state.exported) 1 else 0}\n",
         )
     }
 
+    private fun invalidateChapterExportIfMarked(id: String) {
+        val s = readChapterWorkflowState(id)
+        if (s.exported) {
+            writeChapterWorkflowState(id, s.copy(exported = false))
+        }
+    }
+
     fun setChapterMarkupDone(id: String, done: Boolean) {
-        val (_, v) = readChapterWorkflowFlags(id)
-        writeChapterWorkflowFlags(id, done, v)
+        val s = readChapterWorkflowState(id)
+        writeChapterWorkflowState(id, s.copy(markupDone = done))
     }
 
     fun setChapterVoiceDone(id: String, done: Boolean) {
-        val (m, _) = readChapterWorkflowFlags(id)
-        writeChapterWorkflowFlags(id, m, done)
+        val s = readChapterWorkflowState(id)
+        writeChapterWorkflowState(id, s.copy(voiceDone = done))
+    }
+
+    fun setChapterExported(id: String, exported: Boolean) {
+        val s = readChapterWorkflowState(id)
+        writeChapterWorkflowState(id, s.copy(exported = exported))
     }
 
     fun createChapter(name: String): String {
@@ -197,7 +219,12 @@ object SessionStorage {
     }
 
     fun setChapterText(id: String, text: String) {
-        File(chapterDir(id), "text.txt").writeText(text)
+        val f = File(chapterDir(id), "text.txt")
+        val old = if (f.exists()) f.readText() else ""
+        if (old != text) {
+            invalidateChapterExportIfMarked(id)
+        }
+        f.writeText(text)
     }
 
     fun getOriginalText(id: String): String {
@@ -206,7 +233,12 @@ object SessionStorage {
     }
 
     fun setOriginalText(id: String, text: String) {
-        File(chapterDir(id), "original_text.txt").writeText(text)
+        val f = File(chapterDir(id), "original_text.txt")
+        val old = if (f.exists()) f.readText() else ""
+        if (old != text) {
+            invalidateChapterExportIfMarked(id)
+        }
+        f.writeText(text)
     }
 
     var voiceMapping: Map<String, VoiceSettings>
@@ -239,12 +271,21 @@ object SessionStorage {
     }
 
     fun setChapterAudioPath(id: String, path: String) {
-        File(chapterDir(id), "audio_path.txt").writeText(path)
+        val f = File(chapterDir(id), "audio_path.txt")
+        val old = if (f.exists()) f.readText().trim() else ""
+        val newPath = path.trim()
+        if (old != newPath) {
+            invalidateChapterExportIfMarked(id)
+        }
+        f.writeText(path)
     }
 
     fun clearChapterAudioPath(id: String) {
         val f = File(chapterDir(id), "audio_path.txt")
-        if (f.exists()) f.delete()
+        if (f.exists()) {
+            invalidateChapterExportIfMarked(id)
+            f.delete()
+        }
     }
 
     fun getChapterCacheDir(id: String): File {

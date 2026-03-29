@@ -608,6 +608,123 @@ fun SplitSegmentDialog(
 }
 
 @Composable
+fun AudiobookExportDialog(
+    chapters: List<ChapterInfo>,
+    eligibilityIssues: (ChapterInfo) -> List<String>,
+    selectedIds: Set<String>,
+    onSelectedIdsChange: (Set<String>) -> Unit,
+    validationError: String,
+    onDismiss: () -> Unit,
+    onExport: (List<String>) -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Экспорт аудиокниги по главам") },
+        text = {
+            Column(modifier = Modifier.heightIn(max = 460.dp)) {
+                Text(
+                    "В имени файла — номер главы по порядку в книге. Между двумя выбранными главами " +
+                        "все промежуточные должны быть уже в экспорте. При открытии отмечены готовые главы " +
+                        "без пометки «Экспорт» (после правок текста, оригинала или новой озвучки пометка снимается).",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(Modifier.height(8.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    TextButton(
+                        onClick = {
+                            val ready = chapters.filter { eligibilityIssues(it).isEmpty() }
+                            onSelectedIdsChange(ready.filter { !it.exported }.map { it.id }.toSet())
+                        },
+                    ) {
+                        Text("Новые готовые")
+                    }
+                    TextButton(
+                        onClick = {
+                            onSelectedIdsChange(
+                                chapters.filter { eligibilityIssues(it).isEmpty() }.map { it.id }.toSet(),
+                            )
+                        },
+                    ) {
+                        Text("Все готовые")
+                    }
+                    TextButton(onClick = { onSelectedIdsChange(emptySet()) }) {
+                        Text("Снять")
+                    }
+                }
+                if (validationError.isNotBlank()) {
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        validationError,
+                        color = MaterialTheme.colorScheme.error,
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
+                Spacer(Modifier.height(8.dp))
+                LazyColumn(
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier.heightIn(max = 320.dp),
+                ) {
+                    items(chapters, key = { it.id }) { ch ->
+                        val issues = eligibilityIssues(ch)
+                        val eligible = issues.isEmpty()
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
+                            Checkbox(
+                                checked = ch.id in selectedIds,
+                                onCheckedChange = {
+                                    if (!eligible) return@Checkbox
+                                    onSelectedIdsChange(
+                                        if (ch.id in selectedIds) selectedIds - ch.id else selectedIds + ch.id,
+                                    )
+                                },
+                                enabled = eligible,
+                            )
+                            Column(Modifier.weight(1f)) {
+                                Row(
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    Text(ch.name, style = MaterialTheme.typography.bodyMedium)
+                                    if (ch.exported) {
+                                        Text(
+                                            "экспорт",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.primary,
+                                        )
+                                    }
+                                }
+                                if (!eligible) {
+                                    Text(
+                                        issues.joinToString("; "),
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = { onExport(selectedIds.toList()) },
+                enabled = selectedIds.isNotEmpty(),
+            ) {
+                Text("Экспортировать…")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Отмена") }
+        },
+    )
+}
+
+@Composable
 fun ChaptersWorkflowDialog(
     chapters: List<ChapterInfo>,
     currentChapterId: String,
@@ -629,7 +746,7 @@ fun ChaptersWorkflowDialog(
                 Text(
                     "Отметьте галочками главы для пакетной авто-разметки или пакетной озвучки " +
                         "(как кнопка «Озвучить»: с разметкой — по сегментам и голосам, без — целиком). " +
-                        "Чипы «Разметка» и «Озвучка» — ваши ручные отметки прогресса.",
+                        "Чипы «Разметка», «Озвучка» и «Экспорт» — прогресс; «Экспорт» только для просмотра.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -682,6 +799,12 @@ fun ChaptersWorkflowDialog(
                                         },
                                         enabled = audioExists(ch.id),
                                         label = { Text("Озвучка") },
+                                    )
+                                    FilterChip(
+                                        selected = ch.exported,
+                                        onClick = { },
+                                        enabled = false,
+                                        label = { Text("Экспорт") },
                                     )
                                 }
                             }

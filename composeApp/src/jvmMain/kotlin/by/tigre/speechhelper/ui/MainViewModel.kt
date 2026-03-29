@@ -123,6 +123,12 @@ class MainViewModel(private val scope: CoroutineScope) {
     var audiobookExportBlockedRows by mutableStateOf<List<Pair<String, List<String>>>>(emptyList())
         private set
 
+    var showAudiobookExportDialog by mutableStateOf(false)
+    /** Сбрасывает выбор в UI при каждом открытии диалога экспорта */
+    var audiobookExportDialogKey by mutableStateOf(0)
+        private set
+    var audiobookExportValidationError by mutableStateOf("")
+
     private var pendingMarkupChapterIds: List<String>? = null
 
     val hasMarkers: Boolean get() = TextParser.hasVoiceMarkers(text)
@@ -393,12 +399,71 @@ class MainViewModel(private val scope: CoroutineScope) {
         return issues
     }
 
+    fun chapterAudiobookExportEligibilityIssues(ch: ChapterInfo): List<String> =
+        chapterAudiobookExportIssues(ch)
+
     fun isAudiobookExportReady(): Boolean =
         chapters.isNotEmpty() && chapters.all { chapterAudiobookExportIssues(it).isEmpty() }
 
     fun dismissAudiobookExportBlockedDialog() {
         showAudiobookExportBlockedDialog = false
         audiobookExportBlockedRows = emptyList()
+    }
+
+    fun dismissAudiobookExportDialog() {
+        showAudiobookExportDialog = false
+        audiobookExportValidationError = ""
+    }
+
+    fun defaultAudiobookExportSelection(): Set<String> {
+        val list = SessionStorage.listChapters()
+        return list
+            .filter { chapterAudiobookExportIssues(it).isEmpty() && !it.exported }
+            .map { it.id }
+            .toSet()
+    }
+
+    /**
+     * Между любыми двумя выбранными главами по порядку книги все промежуточные главы
+     * должны быть уже отмечены как экспортированные (чтобы «дырки» в нумерации были осознанными).
+     */
+    fun validateAudiobookExportSelection(selectedIds: List<String>): String? {
+        chapters = SessionStorage.listChapters()
+        val ids = selectedIds.distinct()
+        if (ids.isEmpty()) return "Отметьте хотя бы одну главу"
+        val order = chapters.map { it.id }
+        for (id in ids) {
+            val ch = chapters.find { it.id == id } ?: return "Неизвестная глава"
+            val issues = chapterAudiobookExportIssues(ch)
+            if (issues.isNotEmpty()) {
+                return "«${ch.name}»: ${issues.joinToString("; ")}"
+            }
+        }
+        val selectedSorted = ids.sortedBy { order.indexOf(it) }
+        for (i in 0 until selectedSorted.size - 1) {
+            val a = order.indexOf(selectedSorted[i])
+            val b = order.indexOf(selectedSorted[i + 1])
+            for (k in a + 1 until b) {
+                val mid = chapters[k]
+                if (!mid.exported) {
+                    return "Между «${chapters[a].name}» и «${chapters[b].name}» глава «${mid.name}» " +
+                        "ещё не в экспорте. Добавьте её в выбор или сначала экспортируйте промежуточные главы."
+                }
+            }
+        }
+        return null
+    }
+
+    fun submitAudiobookExport(selectedIds: List<String>) {
+        chapters = SessionStorage.listChapters()
+        audiobookExportValidationError = ""
+        val err = validateAudiobookExportSelection(selectedIds)
+        if (err != null) {
+            audiobookExportValidationError = err
+            return
+        }
+        showAudiobookExportDialog = false
+        scope.launch { runAudiobookExportForChapterIds(selectedIds) }
     }
 
     fun requestAudiobookExport() {
@@ -408,21 +473,15 @@ class MainViewModel(private val scope: CoroutineScope) {
             showAudiobookExportBlockedDialog = true
             return
         }
-        val blocked = chapters.mapNotNull { ch ->
-            val issues = chapterAudiobookExportIssues(ch)
-            if (issues.isEmpty()) null else ch.name to issues
-        }
-        if (blocked.isNotEmpty()) {
-            audiobookExportBlockedRows = blocked
-            showAudiobookExportBlockedDialog = true
-            return
-        }
-        scope.launch { runAudiobookExport() }
+        audiobookExportValidationError = ""
+        audiobookExportDialogKey++
+        showAudiobookExportDialog = true
     }
 
-    private suspend fun runAudiobookExport() {
+    private suspend fun runAudiobookExportForChapterIds(chapterIds: List<String>) {
         chapters = SessionStorage.listChapters()
-        val toExport = chapters.toList()
+        val order = chapters.map { it.id }
+        val toExport = chapterIds.distinct().sortedBy { order.indexOf(it) }
         val parentDir = withContext(Dispatchers.IO) {
             val chooser = JFileChooser().apply {
                 dialogTitle = "Выберите папку для экспорта аудиокниги"
@@ -441,23 +500,30 @@ class MainViewModel(private val scope: CoroutineScope) {
                 if (!destRoot.isDirectory) {
                     error("Не удалось создать папку: ${destRoot.absolutePath}")
                 }
-                val numWidth = maxOf(2, toExport.size.toString().length)
-                toExport.forEachIndexed { index, ch ->
+                val numWidth = maxOf(2, chapters.size.toString().length)
+                for (chId in toExport) {
+                    val ch = chapters.find { it.id == chId }
+                        ?: error("Нет главы: $chId")
                     val srcPath = SessionStorage.getChapterAudioPath(ch.id)
                         ?: error("Нет пути к аудио: ${ch.name}")
                     val src = File(srcPath)
                     if (!src.isFile) error("Нет файла озвучки: ${ch.name}")
                     val ext = src.extension.ifBlank { "mp3" }
-                    val num = (index + 1).toString().padStart(numWidth, '0')
-                    val partName = sanitizeAudioFileNamePart(ch.name).ifBlank { "глава_${index + 1}" }
+                    val index1 = order.indexOf(chId) + 1
+                    val num = index1.toString().padStart(numWidth, '0')
+                    val partName = sanitizeAudioFileNamePart(ch.name).ifBlank { "глава_$index1" }
                     val dest = File(destRoot, "$num - $partName.$ext")
                     src.copyTo(dest, overwrite = true)
+                }
+                for (chId in toExport) {
+                    SessionStorage.setChapterExported(chId, true)
                 }
                 destRoot.absolutePath
             }
         }
+        refreshChapters()
         statusMessage = result.fold(
-            onSuccess = { "Аудиокнига экспортирована: $it" },
+            onSuccess = { "Экспортировано глав: ${toExport.size} → $it" },
             onFailure = { "Ошибка экспорта: ${it.message ?: it.javaClass.simpleName}" },
         )
     }
@@ -923,9 +989,13 @@ class MainViewModel(private val scope: CoroutineScope) {
                             ok++
                             lines.add("$label: сохранено с ошибками сегментов\n${r.segmentErrors.joinToString("\n")}")
                         }
-                        else -> ok++
+                        else -> {
+                            ok++
+                            SessionStorage.setChapterVoiceDone(id, true)
+                        }
                     }
                 }
+                refreshChapters()
                 statusMessage = buildString {
                     append("Пакетная озвучка: готово $ok из ${distinct.size}")
                     if (lines.isNotEmpty()) {

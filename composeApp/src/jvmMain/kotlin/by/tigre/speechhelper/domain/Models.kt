@@ -7,6 +7,8 @@ data class ChapterInfo(
     val markupDone: Boolean = false,
     /** Пользователь отметил, что озвучка принята (есть файл) */
     val voiceDone: Boolean = false,
+    /** Файл главы скопирован в последнем экспорте аудиокниги (сбрасывается при правках текста/оригинала/аудио) */
+    val exported: Boolean = false,
 )
 
 
