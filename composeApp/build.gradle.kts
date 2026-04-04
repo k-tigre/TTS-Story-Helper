@@ -48,6 +48,7 @@ kotlin {
             implementation(libs.kotlinx.serialization.json)
             implementation(libs.mp3spi)
             implementation(libs.jsoup)
+            implementation(libs.logback.classic)
             implementation(libs.sqldelight.sqlite.driver)
         }
     }
@@ -57,6 +58,11 @@ kotlin {
 compose.desktop {
     application {
         mainClass = "by.tigre.speechhelper.MainKt"
+        jvmArgs += listOf(
+            "-Dfile.encoding=UTF-8",
+            "-Dsun.stdout.encoding=UTF-8",
+            "-Dsun.stderr.encoding=UTF-8",
+        )
 
         nativeDistributions {
             targetFormats(TargetFormat.Dmg, TargetFormat.Msi, TargetFormat.Deb)
