@@ -13,6 +13,7 @@ import by.tigre.speechhelper.data.Fb2Parser
 import by.tigre.speechhelper.data.ParsedBook
 import by.tigre.speechhelper.data.MarkupResult
 import by.tigre.speechhelper.data.OpenAiMarkupApi
+import by.tigre.speechhelper.data.ImportApplyResult
 import by.tigre.speechhelper.data.LocalTtsApi
 import by.tigre.speechhelper.data.SessionStorage
 import by.tigre.speechhelper.data.SpeechSynthesizer
@@ -40,6 +41,11 @@ import kotlinx.coroutines.withContext
 import java.io.File
 import javax.swing.JFileChooser
 import javax.swing.filechooser.FileNameExtensionFilter
+
+private sealed interface ImportBackgroundResult {
+    data object EmptyChapters : ImportBackgroundResult
+    data class Success(val book: ParsedBook, val apply: ImportApplyResult) : ImportBackgroundResult
+}
 
 /** Фильтр списка сегментов в режиме «Разбивка». */
 sealed class SegmentViewVoiceFilter {
@@ -338,13 +344,12 @@ class MainViewModel(private val scope: CoroutineScope) {
 
     fun importFb2() {
         scope.launch {
-            val file = withContext(Dispatchers.IO) {
-                val chooser = JFileChooser().apply {
-                    dialogTitle = "Выбрать FB2 файл"
-                    fileFilter = FileNameExtensionFilter("FictionBook 2 (*.fb2)", "fb2")
-                }
-                if (chooser.showOpenDialog(null) == JFileChooser.APPROVE_OPTION) chooser.selectedFile else null
+            val chooser = JFileChooser().apply {
+                dialogTitle = "Выбрать FB2 файл"
+                fileFilter = FileNameExtensionFilter("FictionBook 2 (*.fb2)", "fb2")
             }
+            val file =
+                if (chooser.showOpenDialog(null) == JFileChooser.APPROVE_OPTION) chooser.selectedFile else null
             if (file == null) return@launch
             importParsedBook(label = "FB2") { Fb2Parser.parse(file) }
         }
@@ -352,55 +357,70 @@ class MainViewModel(private val scope: CoroutineScope) {
 
     fun importEpub() {
         scope.launch {
-            val file = withContext(Dispatchers.IO) {
-                val chooser = JFileChooser().apply {
-                    dialogTitle = "Выбрать EPUB файл"
-                    fileFilter = FileNameExtensionFilter("EPUB (*.epub)", "epub")
-                }
-                if (chooser.showOpenDialog(null) == JFileChooser.APPROVE_OPTION) chooser.selectedFile else null
+            val chooser = JFileChooser().apply {
+                dialogTitle = "Выбрать EPUB файл"
+                fileFilter = FileNameExtensionFilter("EPUB (*.epub)", "epub")
             }
+            val file =
+                if (chooser.showOpenDialog(null) == JFileChooser.APPROVE_OPTION) chooser.selectedFile else null
             if (file == null) return@launch
             importParsedBook(label = "EPUB") { EpubParser.parse(file) }
         }
     }
 
     private suspend fun importParsedBook(label: String, parse: suspend () -> ParsedBook) {
+        val chapterIdSnapshot = currentChapterId
+        val textSnapshot = text
         isLoading = true
         progressMessage = "Чтение $label..."
         try {
-            val book = withContext(Dispatchers.IO) { parse() }
-            if (book.chapters.isEmpty()) {
-                statusMessage = "Ошибка: не найдены главы в файле"
-                return
+            val work = withContext(Dispatchers.IO) {
+                val book = parse()
+                if (book.chapters.isEmpty()) {
+                    return@withContext ImportBackgroundResult.EmptyChapters
+                }
+                withContext(SessionStorage.databaseDispatcher) {
+                    SessionStorage.setChapterText(chapterIdSnapshot, textSnapshot)
+                }
+                withContext(Dispatchers.Main) {
+                    progressMessage = "Подготовка текста..."
+                }
+                val prepared = book.preparedForStorage()
+                withContext(Dispatchers.Main) {
+                    progressMessage = "Запись в базу..."
+                }
+                val result = withContext(SessionStorage.databaseDispatcher) {
+                    SessionStorage.applyImportedBookPrepared(book.title, prepared)
+                }
+                ImportBackgroundResult.Success(book, result)
             }
 
-            // setChapterText → SQLite блокирует вызывающий поток; не вызывать с UI (Compose main).
-            withContext(SessionStorage.databaseDispatcher) {
-                SessionStorage.setChapterText(currentChapterId, text)
+            when (work) {
+                ImportBackgroundResult.EmptyChapters -> {
+                    statusMessage = "Ошибка: не найдены главы в файле"
+                    return
+                }
+                is ImportBackgroundResult.Success -> {
+                    val book = work.book
+                    val result = work.apply
+                    chapterPlayer.close()
+                    playerIsPlaying = false
+                    chapters = result.chapters
+                    currentChapterId = result.firstChapterId
+                    val snap = result.initialEditor
+                    text = snap.markedJoined
+                    originalText = snap.originalJoined
+                    chapterAudioPath = snap.audioPath
+                    voiceMapping.clear()
+                    currentBookName = result.bookTitle
+                    segmentViewVoiceFilter = SegmentViewVoiceFilter.All
+                    markupModeEnabled = originalText.isNotBlank() && hasMarkers
+                    ensureVoiceMain()
+                    revalidate(preloadedOriginalParagraphs = snap.originalParagraphs)
+                    statusMessage =
+                        "Добавлено в библиотеку: \"${result.bookTitle}\" (${book.chapters.size} гл.). Открыть другую — «Загрузить книгу»."
+                }
             }
-            progressMessage = "Подготовка текста..."
-            val prepared = withContext(Dispatchers.Default) { book.preparedForStorage() }
-            progressMessage = "Запись в базу..."
-            val result = withContext(SessionStorage.databaseDispatcher) {
-                SessionStorage.applyImportedBookPrepared(book.title, prepared)
-            }
-
-            chapterPlayer.close()
-            playerIsPlaying = false
-            chapters = result.chapters
-            currentChapterId = result.firstChapterId
-            val snap = result.initialEditor
-            text = snap.markedJoined
-            originalText = snap.originalJoined
-            chapterAudioPath = snap.audioPath
-            voiceMapping.clear()
-            currentBookName = result.bookTitle
-            segmentViewVoiceFilter = SegmentViewVoiceFilter.All
-            markupModeEnabled = originalText.isNotBlank() && hasMarkers
-            ensureVoiceMain()
-            revalidate(preloadedOriginalParagraphs = snap.originalParagraphs)
-            statusMessage =
-                "Добавлено в библиотеку: \"${result.bookTitle}\" (${book.chapters.size} гл.). Открыть другую — «Загрузить книгу»."
         } catch (e: Exception) {
             statusMessage = "Ошибка импорта $label: ${e.message}"
             e.printStackTrace()
