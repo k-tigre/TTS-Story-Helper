@@ -7,6 +7,7 @@ import by.tigre.speechhelper.TokenStorage
 import by.tigre.speechhelper.data.AiMarkupApi
 import by.tigre.speechhelper.data.AutoMarkupBatchAlign
 import by.tigre.speechhelper.data.AutoMarkupFingerprint
+import by.tigre.speechhelper.data.AutoMarkupOrderCheck
 import by.tigre.speechhelper.data.AutoMarkupParagraphPlanner
 import by.tigre.speechhelper.data.MarkupResult
 import by.tigre.speechhelper.data.MarkupSystemPrompts
@@ -1067,7 +1068,16 @@ class MainViewModel(
                     return e
                 }
             }
-            working[i] = subResults.joinToString(" ").trim()
+            val merged = subResults.joinToString(" ").trim()
+            val order = AutoMarkupOrderCheck.verify(sourceFull, merged)
+            if (!order.ok) {
+                addRemarkupNeeded(chapterId, listOf(i))
+                return Exception(
+                    "разметка отклонена: нарушен порядок слов относительно исходника " +
+                        "(${(order.matchRatio * 100).toInt()}%, порог 88%)",
+                )
+            }
+            working[i] = merged
             persistAfterBatch(listOf(i to fingerprintHex), contextDetail)
             return null
         }
@@ -1086,10 +1096,20 @@ class MainViewModel(
                 if (batch.size == 1) {
                     val i = batch[0]
                     if (joined.length <= chunkLimit) {
-                        val marked = callMarkupChunk(joined, systemPrompt, packDetail)
-                        voicesAcc.addAll(TextParser.extractVoiceNames(marked))
-                        working[i] = marked.trim()
-                        persistAfterBatch(listOf(i to fingerprints[0].second), packDetail)
+                        val marked = callMarkupChunk(joined, systemPrompt, packDetail).trim()
+                        val ord = AutoMarkupOrderCheck.verify(sources[0], marked)
+                        if (!ord.ok) {
+                            val label = library.chapters.find { it.id == chapterId }?.name ?: chapterId
+                            errors.add(
+                                "$label, $packDetail: разметка отклонена — нарушен порядок слов " +
+                                    "(${(ord.matchRatio * 100).toInt()}%, порог 88%). Переразметьте абзац ${i + 1}.",
+                            )
+                            addRemarkupNeeded(chapterId, batch)
+                        } else {
+                            voicesAcc.addAll(TextParser.extractVoiceNames(marked))
+                            working[i] = marked
+                            persistAfterBatch(listOf(i to fingerprints[0].second), packDetail)
+                        }
                     } else {
                         trySingleParagraphSubchunks(i, sources[0], fingerprints[0].second, packDetail)?.let { throw it }
                     }
@@ -1100,11 +1120,29 @@ class MainViewModel(
                 voicesAcc.addAll(TextParser.extractVoiceNames(markedJoined))
                 val aligned = AutoMarkupBatchAlign.alignOrNull(sources, markedJoined)
                 if (aligned != null) {
-                    for (k in batch.indices) {
-                        working[batch[k]] = aligned[k].trim()
-                        voicesAcc.addAll(TextParser.extractVoiceNames(aligned[k]))
+                    val orderBad = batch.indices.filter {
+                        !AutoMarkupOrderCheck.verify(sources[it], aligned[it].trim()).ok
                     }
-                    persistAfterBatch(fingerprints, packDetail)
+                    if (orderBad.isNotEmpty()) {
+                        val label = library.chapters.find { it.id == chapterId }?.name ?: chapterId
+                        val nums = orderBad.map { batch[it] + 1 }.sorted().joinToString(", ")
+                        val detail = orderBad.joinToString("; ") { ix ->
+                            val o = AutoMarkupOrderCheck.verify(sources[ix], aligned[ix].trim())
+                            "абз. ${batch[ix] + 1}: ${(o.matchRatio * 100).toInt()}%"
+                        }
+                        errors.add(
+                            "$label, $packDetail: ответ нельзя принять — нарушен порядок слов в абзацах $nums ($detail). " +
+                                "Переразметьте эти абзацы.",
+                        )
+                        addRemarkupNeeded(chapterId, batch)
+                    } else {
+                        for (k in batch.indices) {
+                            val piece = aligned[k].trim()
+                            working[batch[k]] = piece
+                            voicesAcc.addAll(TextParser.extractVoiceNames(piece))
+                        }
+                        persistAfterBatch(fingerprints, packDetail)
+                    }
                 } else {
                     val label = library.chapters.find { it.id == chapterId }?.name ?: chapterId
                     val nums = batch.map { it + 1 }.sorted().joinToString(", ")
@@ -1238,7 +1276,16 @@ class MainViewModel(
                     subResults.add(marked)
                     voicesAcc.addAll(TextParser.extractVoiceNames(marked))
                 }
-                working[i] = subResults.joinToString(" ").trim()
+                val merged = subResults.joinToString(" ").trim()
+                val ordCheck = AutoMarkupOrderCheck.verify(sourceFull, merged)
+                if (!ordCheck.ok) {
+                    addRemarkupNeeded(chapterId, setOf(i))
+                    statusMessage =
+                        "Абзац ${i + 1}: разметка отклонена — нарушен порядок слов " +
+                            "(${(ordCheck.matchRatio * 100).toInt()}%, порог 88%). Повторите или переразметьте вручную."
+                    return@launch
+                }
+                working[i] = merged
                 val fp = AutoMarkupFingerprint.sha256Hex(sourceFull)
                 val pairs = originals.zip(working) { o, m -> o to m }
                 SessionStorage.replaceAllParagraphsForChapter(chapterId, pairs)
