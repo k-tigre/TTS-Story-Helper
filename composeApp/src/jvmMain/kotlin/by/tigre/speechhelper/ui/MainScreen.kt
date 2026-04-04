@@ -55,6 +55,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.layout.LayoutCoordinates
 import androidx.compose.ui.layout.onGloballyPositioned
@@ -87,7 +88,9 @@ import by.tigre.speechhelper.domain.VoiceSettings
 import kotlin.math.roundToInt
 import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.debounce
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.isActive
 import java.io.File
 
@@ -157,10 +160,18 @@ fun MainScreen() {
         }
     }
 
-    // Sync segments when switching to segment view or split view
+    // Синхронизация сегментов сырой разметки при смене главы / вкладки / режима
     LaunchedEffect(vm.viewMode, vm.currentChapterId, vm.markupModeEnabled, vm.isLoading) {
         if (vm.isLoading) return@LaunchedEffect
         if (vm.viewMode == 1 || (vm.viewMode == 0 && vm.markupModeEnabled)) vm.syncSegmentsFromText()
+    }
+
+    // Вкладка «Разметка»: отложенный parse+валидация после правок (на «Разбивке» не трогаем — там сегменты первичны)
+    LaunchedEffect(vm.currentChapterId, vm.markupModeEnabled, vm.isLoading, vm.viewMode) {
+        if (vm.isLoading || !vm.markupModeEnabled || vm.viewMode != 0) return@LaunchedEffect
+        snapshotFlow { vm.text to vm.originalText }
+            .debounce(400)
+            .collectLatest { vm.syncSegmentsFromText() }
     }
 
     // ── Dialogs ───────────────────────────────────────────────────────────────
@@ -424,7 +435,7 @@ fun MainScreen() {
                             vm.viewMode = 0
                         },
                     ) {
-                        Text("Текст", modifier = Modifier.padding(vertical = 8.dp))
+                        Text("Разметка", modifier = Modifier.padding(vertical = 8.dp))
                     }
                     Tab(
                         selected = vm.viewMode == 1,
@@ -452,16 +463,45 @@ fun MainScreen() {
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
-                } else if (vm.viewMode == 0 || !vm.markupModeEnabled) {
-                    if (vm.markupModeEnabled) {
-                        val splitOriginal = remember(vm.originalText, vm.text) {
-                            vm.originalText.ifBlank {
-                                TextParser.parse(vm.text).joinToString("\n\n") { it.text }
+                } else if (!vm.markupModeEnabled) {
+                    Column(modifier = Modifier.weight(1f).fillMaxHeight()) {
+                        OutlinedTextField(
+                            value = textFieldValue,
+                            onValueChange = { newValue ->
+                                textFieldValue = newValue
+                                vm.text = newValue.text
+                            },
+                            label = { Text("Текст для озвучивания") },
+                            modifier = Modifier.fillMaxWidth().weight(1f)
+                                .onPreviewKeyEvent { event ->
+                                    handleEditorKeys(event, textFieldValue) { newValue ->
+                                        textFieldValue = newValue
+                                        vm.text = newValue.text
+                                    }
+                                },
+                            minLines = 5,
+                        )
+                        if (vm.text.isNotBlank()) {
+                            OutlinedButton(
+                                onClick = {
+                                    if (vm.hasMarkers) vm.enableMarkupMode()
+                                    else vm.wrapTextAsMarkup()
+                                },
+                                modifier = Modifier.padding(top = 8.dp),
+                            ) {
+                                Text("Режим разметки")
                             }
                         }
-                        Column(modifier = Modifier.weight(1f).fillMaxHeight()) {
-                            // Split view: original text | raw markup (editable)
-                            MarkupSplitView(
+                    }
+                } else {
+                    val splitOriginal = remember(vm.originalText, vm.text) {
+                        vm.originalText.ifBlank {
+                            TextParser.parse(vm.text).joinToString("\n\n") { it.text }
+                        }
+                    }
+                    Column(modifier = Modifier.weight(1f).fillMaxHeight()) {
+                        when (vm.viewMode) {
+                            0 -> MarkupSplitView(
                                 originalText = splitOriginal,
                                 markupText = vm.text,
                                 onMarkupTextChange = { newText ->
@@ -471,76 +511,38 @@ fun MainScreen() {
                                     vm.updateOriginalText(newOriginal)
                                 },
                                 validationResult = vm.validationResult,
-                                segments = vm.segments.toList(),
+                                segments = vm.segments,
                                 onRevalidate = { vm.revalidate() },
                                 modifier = Modifier.weight(1f).fillMaxWidth(),
                             )
-                            if (vm.detectedVoices.size <= 1) {
-                                OutlinedButton(
-                                    onClick = { vm.unwrapMarkup() },
-                                    enabled = !vm.isLoading,
-                                    modifier = Modifier.padding(top = 8.dp),
-                                ) {
-                                    Text("Обычный режим")
-                                }
-                            }
-                        }
-                    } else {
-                        Column(modifier = Modifier.weight(1f).fillMaxHeight()) {
-                            OutlinedTextField(
-                                value = textFieldValue,
-                                onValueChange = { newValue ->
-                                    textFieldValue = newValue
-                                    vm.text = newValue.text
+                            else -> ParagraphAlignedSplitView(
+                                originalText = splitOriginal,
+                                onOriginalTextChange = { vm.updateOriginalText(it) },
+                                segments = vm.segments,
+                                validationResult = vm.validationResult,
+                                voiceMapping = vm.voiceMapping,
+                                synthesizeAudio = { t, s -> vm.synthesizeAudio(t, s, "wav") },
+                                onSegmentTextChange = { index, newText ->
+                                    vm.segments[index] = vm.segments[index].copy(text = newText)
                                 },
-                                label = { Text("Текст для озвучивания") },
-                                modifier = Modifier.fillMaxWidth().weight(1f)
-                                    .onPreviewKeyEvent { event ->
-                                        handleEditorKeys(event, textFieldValue) { newValue ->
-                                            textFieldValue = newValue
-                                            vm.text = newValue.text
-                                        }
-                                    },
-                                minLines = 5,
+                                onSplitSegment = { index, parts ->
+                                    val voiceName = vm.segments[index].voiceName
+                                    vm.segments.removeAt(index)
+                                    vm.segments.addAll(index, parts.map { TextSegment(voiceName = voiceName, text = it) })
+                                },
+                                onMergeWithPrevious = { vm.mergeSegmentWithPrevious(it) },
+                                onMergeWithNext = { vm.mergeSegmentWithNext(it) },
+                                onRemarkupSegment = { vm.remarkupSegment(it) },
+                                onChangeSegmentVoice = { index, newVoiceName ->
+                                    vm.segments[index] = vm.segments[index].copy(voiceName = newVoiceName)
+                                },
+                                availableVoiceNames = vm.voiceMapping.keys.toList().sorted(),
+                                isLoading = vm.isLoading,
+                                onRevalidate = { vm.revalidate() },
+                                modifier = Modifier.weight(1f).fillMaxWidth(),
                             )
-                            if (vm.text.isNotBlank()) {
-                                OutlinedButton(
-                                    onClick = {
-                                        if (vm.hasMarkers) vm.enableMarkupMode()
-                                        else vm.wrapTextAsMarkup()
-                                    },
-                                    modifier = Modifier.padding(top = 8.dp),
-                                ) {
-                                    Text("Режим разметки")
-                                }
-                            }
                         }
                     }
-                } else {
-                    SegmentsView(
-                        segments = vm.segments.toList(),
-                        voiceMapping = vm.voiceMapping,
-                        voiceListFilter = vm.segmentViewVoiceFilter,
-                        onVoiceListFilterChange = { vm.segmentViewVoiceFilter = it },
-                        synthesizeAudio = { t, s -> vm.synthesizeAudio(t, s, "wav") },
-                        onSegmentTextChange = { index, newText ->
-                            vm.segments[index] = vm.segments[index].copy(text = newText)
-                        },
-                        onSplitSegment = { index, parts ->
-                            val voiceName = vm.segments[index].voiceName
-                            vm.segments.removeAt(index)
-                            vm.segments.addAll(index, parts.map { TextSegment(voiceName = voiceName, text = it) })
-                        },
-                        onMergeWithPrevious = { vm.mergeSegmentWithPrevious(it) },
-                        onMergeWithNext = { vm.mergeSegmentWithNext(it) },
-                        onRemarkupSegment = { vm.remarkupSegment(it) },
-                        onChangeSegmentVoice = { index, newVoiceName ->
-                            vm.segments[index] = vm.segments[index].copy(voiceName = newVoiceName)
-                        },
-                        availableVoiceNames = vm.voiceMapping.keys.toList().sorted(),
-                        isLoading = vm.isLoading,
-                        modifier = Modifier.weight(1f),
-                    )
                 }
 
                 // Voice mapping panel (always visible)
@@ -908,6 +910,8 @@ private fun MarkupSplitView(
     modifier: Modifier = Modifier,
 ) {
     var isEditingOriginal by remember { mutableStateOf(false) }
+    var markupHasFocus by remember { mutableStateOf(false) }
+    var originalFieldHasFocus by remember { mutableStateOf(false) }
     val outlineColor = MaterialTheme.colorScheme.outline
     val onSurfaceColor = MaterialTheme.colorScheme.onSurface
     val labelStyle = MaterialTheme.typography.labelMedium
@@ -974,27 +978,39 @@ private fun MarkupSplitView(
         val lastSyncedRight = remember { androidx.compose.runtime.mutableIntStateOf(-1) }
         LaunchedEffect(Unit) {
             snapshotFlow { leftScrollState.value }
+                .distinctUntilChanged()
                 .collect { value ->
                     if (value == lastSyncedLeft.intValue) {
                         lastSyncedLeft.intValue = -1 // consume: this was a sync scroll
-                    } else if (leftScrollState.maxValue > 0 && rightScrollState.maxValue > 0) {
-                        val fraction = value.toFloat() / leftScrollState.maxValue
-                        val target = (fraction * rightScrollState.maxValue).toInt()
-                        lastSyncedRight.intValue = target
-                        rightScrollState.scrollTo(target)
+                    } else {
+                        val lMax = leftScrollState.maxValue
+                        val rMax = rightScrollState.maxValue
+                        if (lMax <= 0 || rMax <= 0) return@collect
+                        val fraction = value.toFloat() / lMax
+                        val target = (fraction * rMax).roundToInt().coerceIn(0, rMax)
+                        if (kotlin.math.abs(target - rightScrollState.value) > 1) {
+                            lastSyncedRight.intValue = target
+                            rightScrollState.scrollTo(target)
+                        }
                     }
                 }
         }
         LaunchedEffect(Unit) {
             snapshotFlow { rightScrollState.value }
+                .distinctUntilChanged()
                 .collect { value ->
                     if (value == lastSyncedRight.intValue) {
                         lastSyncedRight.intValue = -1 // consume: this was a sync scroll
-                    } else if (rightScrollState.maxValue > 0 && leftScrollState.maxValue > 0) {
-                        val fraction = value.toFloat() / rightScrollState.maxValue
-                        val target = (fraction * leftScrollState.maxValue).toInt()
-                        lastSyncedLeft.intValue = target
-                        leftScrollState.scrollTo(target)
+                    } else {
+                        val lMax = leftScrollState.maxValue
+                        val rMax = rightScrollState.maxValue
+                        if (lMax <= 0 || rMax <= 0) return@collect
+                        val fraction = value.toFloat() / rMax
+                        val target = (fraction * lMax).roundToInt().coerceIn(0, lMax)
+                        if (kotlin.math.abs(target - leftScrollState.value) > 1) {
+                            lastSyncedLeft.intValue = target
+                            leftScrollState.scrollTo(target)
+                        }
                     }
                 }
         }
@@ -1005,8 +1021,12 @@ private fun MarkupSplitView(
                 TextFieldValue(buildValidatedMarkupAnnotatedExact(markupText, validationResult, onSurfaceColor)),
             )
         }
-        LaunchedEffect(markupText, validationResult, onSurfaceColor) {
-            val ann = buildValidatedMarkupAnnotatedExact(markupText, validationResult, onSurfaceColor)
+        LaunchedEffect(markupText, validationResult, onSurfaceColor, markupHasFocus) {
+            val ann = if (markupHasFocus) {
+                AnnotatedString(markupText)
+            } else {
+                buildValidatedMarkupAnnotatedExact(markupText, validationResult, onSurfaceColor)
+            }
             if (markupFieldValue.text != markupText) {
                 markupFieldValue = TextFieldValue(ann, TextRange(markupText.length))
             } else {
@@ -1026,8 +1046,12 @@ private fun MarkupSplitView(
                 TextFieldValue(buildValidatedOriginalAnnotatedExact(originalText, validationResult)),
             )
         }
-        LaunchedEffect(originalText, validationResult) {
-            val ann = buildValidatedOriginalAnnotatedExact(originalText, validationResult)
+        LaunchedEffect(originalText, validationResult, originalFieldHasFocus) {
+            val ann = if (originalFieldHasFocus) {
+                AnnotatedString(originalText)
+            } else {
+                buildValidatedOriginalAnnotatedExact(originalText, validationResult)
+            }
             if (originalFieldValue.text != originalText) {
                 originalFieldValue = TextFieldValue(ann, TextRange(originalText.length))
             } else {
@@ -1072,7 +1096,11 @@ private fun MarkupSplitView(
                                 onValueChange = { newValue ->
                                     val textChanged = newValue.text != originalFieldValue.text
                                     val plain = newValue.text
-                                    val ann = buildValidatedOriginalAnnotatedExact(plain, validationResult)
+                                    val ann = if (originalFieldHasFocus) {
+                                        AnnotatedString(plain)
+                                    } else {
+                                        buildValidatedOriginalAnnotatedExact(plain, validationResult)
+                                    }
                                     originalFieldValue = TextFieldValue(
                                         annotatedString = ann,
                                         selection = newValue.selection,
@@ -1085,14 +1113,19 @@ private fun MarkupSplitView(
                                 cursorBrush = SolidColor(onSurfaceColor),
                                 modifier = Modifier
                                     .fillMaxWidth()
+                                    .onFocusChanged { originalFieldHasFocus = it.isFocused }
                                     .onGloballyPositioned { originalFieldCoords = it }
                                     .onPreviewKeyEvent { event ->
                                         handleEditorKeys(event, originalFieldValue) { newValue ->
                                             val changed = newValue.text != originalFieldValue.text
-                                            val ann = buildValidatedOriginalAnnotatedExact(
-                                                newValue.text,
-                                                validationResult,
-                                            )
+                                            val ann = if (originalFieldHasFocus) {
+                                                AnnotatedString(newValue.text)
+                                            } else {
+                                                buildValidatedOriginalAnnotatedExact(
+                                                    newValue.text,
+                                                    validationResult,
+                                                )
+                                            }
                                             originalFieldValue = TextFieldValue(
                                                 annotatedString = ann,
                                                 selection = newValue.selection,
@@ -1164,7 +1197,11 @@ private fun MarkupSplitView(
                         onValueChange = { newValue ->
                             val textChanged = newValue.text != markupFieldValue.text
                             val plain = newValue.text
-                            val ann = buildValidatedMarkupAnnotatedExact(plain, validationResult, onSurfaceColor)
+                            val ann = if (markupHasFocus) {
+                                AnnotatedString(plain)
+                            } else {
+                                buildValidatedMarkupAnnotatedExact(plain, validationResult, onSurfaceColor)
+                            }
                             markupFieldValue = TextFieldValue(
                                 annotatedString = ann,
                                 selection = newValue.selection,
@@ -1177,15 +1214,20 @@ private fun MarkupSplitView(
                         cursorBrush = SolidColor(onSurfaceColor),
                         modifier = Modifier
                             .fillMaxWidth()
+                            .onFocusChanged { markupHasFocus = it.isFocused }
                             .onGloballyPositioned { markupFieldCoords = it }
                             .onPreviewKeyEvent { event ->
                                 handleEditorKeys(event, markupFieldValue) { newValue ->
                                     val changed = newValue.text != markupFieldValue.text
-                                    val ann = buildValidatedMarkupAnnotatedExact(
-                                        newValue.text,
-                                        validationResult,
-                                        onSurfaceColor,
-                                    )
+                                    val ann = if (markupHasFocus) {
+                                        AnnotatedString(newValue.text)
+                                    } else {
+                                        buildValidatedMarkupAnnotatedExact(
+                                            newValue.text,
+                                            validationResult,
+                                            onSurfaceColor,
+                                        )
+                                    }
                                     markupFieldValue = TextFieldValue(
                                         annotatedString = ann,
                                         selection = newValue.selection,
