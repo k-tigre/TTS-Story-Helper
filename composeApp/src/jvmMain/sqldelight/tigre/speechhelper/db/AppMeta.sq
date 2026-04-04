@@ -1,0 +1,21 @@
+CREATE TABLE app_meta (
+    key TEXT NOT NULL PRIMARY KEY,
+    value TEXT NOT NULL
+);
+
+getValue:
+SELECT value
+FROM app_meta
+WHERE key = ?
+LIMIT 1;
+
+upsert:
+INSERT OR REPLACE INTO app_meta(key, value)
+VALUES (?, ?);
+
+deleteKey:
+DELETE FROM app_meta
+WHERE key = ?;
+
+deleteAll:
+DELETE FROM app_meta;

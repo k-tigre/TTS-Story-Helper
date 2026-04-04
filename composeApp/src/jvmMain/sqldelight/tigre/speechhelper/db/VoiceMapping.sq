@@ -1,0 +1,18 @@
+CREATE TABLE voice_mapping (
+    speaker_name TEXT NOT NULL PRIMARY KEY,
+    voice TEXT NOT NULL,
+    role TEXT NOT NULL DEFAULT '',
+    speed REAL NOT NULL DEFAULT 1.0,
+    pitch_shift REAL NOT NULL DEFAULT 0.0
+);
+
+selectAll:
+SELECT speaker_name, voice, role, speed, pitch_shift
+FROM voice_mapping;
+
+insertRow:
+INSERT OR REPLACE INTO voice_mapping(speaker_name, voice, role, speed, pitch_shift)
+VALUES (?, ?, ?, ?, ?);
+
+deleteAll:
+DELETE FROM voice_mapping;

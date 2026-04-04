@@ -6,6 +6,19 @@ plugins {
     alias(libs.plugins.composeCompiler)
     alias(libs.plugins.composeHotReload)
     alias(libs.plugins.kotlinSerialization)
+    alias(libs.plugins.sqldelight)
+}
+
+sqldelight {
+    databases {
+        create("SpeechHelperDatabase") {
+            // Avoid package segment "by" — SQLDelight generates broken `import Boolean`.
+            packageName.set("tigre.speechhelper.db")
+            dialect(libs.sqldelight.dialect)
+            // KMP project has only jvmMain — schema lives there, not in commonMain.
+            srcDirs("src/jvmMain/sqldelight")
+        }
+    }
 }
 
 kotlin {
@@ -35,6 +48,7 @@ kotlin {
             implementation(libs.kotlinx.serialization.json)
             implementation(libs.mp3spi)
             implementation(libs.jsoup)
+            implementation(libs.sqldelight.sqlite.driver)
         }
     }
 }
