@@ -203,18 +203,18 @@ object TextParser {
 
     /**
      * Compare original text (as source of truth) against parsed segments.
-     *
-     * Algorithm:
-     * 1. Split original text into paragraphs
-     * 2. For each paragraph, search for the best matching window of consecutive segments
-     *    (starting from where the previous paragraph ended)
-     * 3. Match is based on LCS coverage >= 50% of paragraph words
-     * 4. Unmatched segments are collected separately
+     * [originalText] is split with [splitParagraphsForStorage]; prefer
+     * [buildParagraphMapping] with a pre-split list when paragraphs are already in storage.
      */
-    fun buildParagraphMapping(originalText: String, segments: List<TextSegment>): ValidationResult {
-        val origParagraphs = splitParagraphsForStorage(originalText)
+    fun buildParagraphMapping(originalText: String, segments: List<TextSegment>): ValidationResult =
+        buildParagraphMapping(splitParagraphsForStorage(originalText), segments)
 
-        if (origParagraphs.isEmpty()) {
+    /**
+     * Same as [buildParagraphMapping] for a full original string, but [originalParagraphs] are
+     * already the non-empty (after trim) blocks separated by blank lines (e.g. DB paragraph rows).
+     */
+    fun buildParagraphMapping(originalParagraphs: List<String>, segments: List<TextSegment>): ValidationResult {
+        if (originalParagraphs.isEmpty()) {
             return ValidationResult(
                 paragraphs = emptyList(),
                 isFullyValid = segments.isEmpty(),
@@ -247,7 +247,7 @@ object TextParser {
         val usedSegmentIndices = mutableSetOf<Int>()
         var flatWordPos = 0
 
-        val mappings = origParagraphs.mapIndexed { _, origPara ->
+        val mappings = originalParagraphs.mapIndexed { _, origPara ->
             val strippedPara = stripMarkup(origPara)
             val displayToks = splitCompareWhitespace(strippedPara)
             val origSignificant = mutableListOf<OrigSigToken>()

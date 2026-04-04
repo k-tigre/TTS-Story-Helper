@@ -143,10 +143,29 @@ class MainViewModel(private val scope: CoroutineScope) {
             val segs = TextParser.parse(text)
             segments.clear()
             segments.addAll(segs)
-            TextParser.buildParagraphMapping(originalText, segs)
+            val origParagraphs = originalParagraphsForValidation()
+            TextParser.buildParagraphMapping(origParagraphs, segs)
         } else {
             null
         }
+    }
+
+    /**
+     * When the editor’s original matches persisted storage, reuse paragraph rows from SQLite
+     * (no full-string re-split). Otherwise split the in-memory string (e.g. mid-edit before save).
+     */
+    private fun originalParagraphsForValidation(): List<String> {
+        val persisted = SessionStorage.getOriginalText(currentChapterId)
+        if (persisted != originalText) {
+            return TextParser.splitParagraphsForStorage(originalText)
+        }
+        val fromDb = SessionStorage.listChapterParagraphs(currentChapterId)
+            .sortedBy { it.ordinal }
+            .map { it.originalText }
+        if (fromDb.isEmpty() && originalText.isNotBlank()) {
+            return TextParser.splitParagraphsForStorage(originalText)
+        }
+        return fromDb
     }
 
     init {
