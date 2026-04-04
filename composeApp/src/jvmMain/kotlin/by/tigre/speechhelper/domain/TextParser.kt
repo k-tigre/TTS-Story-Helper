@@ -201,6 +201,263 @@ object TextParser {
 
     // ── Paragraph validation ─────────────────────────────────────────────────
 
+    private data class OrigSigToken(val displayIndex: Int, val normalized: String)
+    private data class FlatSigToken(
+        val segmentIndex: Int,
+        val sigIndexInSegment: Int,
+        val normalized: String,
+    )
+
+    private fun buildFlatSigList(segments: List<TextSegment>): List<FlatSigToken> {
+        val flatTokens = mutableListOf<FlatSigToken>()
+        for ((segIdx, seg) in segments.withIndex()) {
+            val inner = stripMarkup(seg.text)
+            val toks = splitCompareWhitespace(inner)
+            var sigIdxInSeg = 0
+            for (w in toks) {
+                val n = normalizeCompareToken(w)
+                if (n.isNotEmpty()) {
+                    flatTokens.add(FlatSigToken(segIdx, sigIdxInSeg, n))
+                    sigIdxInSeg++
+                }
+            }
+        }
+        return flatTokens
+    }
+
+    /**
+     * Where the first character differs between [oldMarkup] and [newMarkup], or [minOf] length if one is a prefix.
+     */
+    fun firstMarkupDiffIndex(oldMarkup: String, newMarkup: String): Int? {
+        val n = minOf(oldMarkup.length, newMarkup.length)
+        for (i in 0 until n) {
+            if (oldMarkup[i] != newMarkup[i]) return i
+        }
+        return if (oldMarkup.length != newMarkup.length) n else null
+    }
+
+    /**
+     * Index into [parse] segment list for the segment that contains character [charIndex] in [markup].
+     */
+    fun segmentIndexAtMarkupChar(markup: String, charIndex: Int): Int {
+        if (markup.isEmpty()) return 0
+        val idx = charIndex.coerceIn(0, markup.lastIndex)
+        var last = 0
+        var seg = 0
+        for (match in TAG_REGEX.findAll(markup)) {
+            val beforeEnd = match.range.first
+            if (beforeEnd > last) {
+                val beforeRaw = markup.substring(last, beforeEnd)
+                if (beforeRaw.trim().isNotBlank()) {
+                    val range = last until beforeEnd
+                    if (idx in range) return seg
+                    seg++
+                }
+            }
+            val innerRange = match.groups[2]!!.range
+            val innerRaw = markup.substring(innerRange)
+            if (idx in match.range) {
+                return if (innerRaw.trim().isNotBlank()) seg else seg
+            }
+            if (innerRaw.trim().isNotBlank()) seg++
+            last = match.range.last + 1
+        }
+        if (last < markup.length) {
+            val tail = markup.substring(last)
+            if (tail.trim().isNotBlank()) {
+                if (idx >= last) return seg
+            }
+        }
+        return seg.coerceAtLeast(0)
+    }
+
+    /**
+     * First original paragraph index to re-check with [buildParagraphMappingIncremental] (includes one neighbor before).
+     */
+    fun findIncrementalMarkupValidationStart(
+        oldMarkup: String,
+        newMarkup: String,
+        previous: ValidationResult,
+    ): Int {
+        val diff = firstMarkupDiffIndex(oldMarkup, newMarkup) ?: return 0
+        val segIdx = segmentIndexAtMarkupChar(newMarkup, diff)
+        var minP = Int.MAX_VALUE
+        for ((pi, p) in previous.paragraphs.withIndex()) {
+            for (s in p.matchedSegmentIndices) {
+                if (s == segIdx) minP = minOf(minP, pi)
+            }
+            for (s in p.extraMarkupSignificantWordIndicesBySegment.keys) {
+                if (s == segIdx) minP = minOf(minP, pi)
+            }
+        }
+        if (minP == Int.MAX_VALUE && segIdx in previous.unmatchedSegmentIndices) {
+            return 0
+        }
+        if (minP == Int.MAX_VALUE) return 0
+        return maxOf(0, minP - 1)
+    }
+
+    /**
+     * Reuse paragraph mappings before [startParagraphIndex] if original lines unchanged; recompute suffix with LCS.
+     */
+    fun buildParagraphMappingIncremental(
+        originalParagraphs: List<String>,
+        segments: List<TextSegment>,
+        previous: ValidationResult,
+        startParagraphIndex: Int,
+    ): ValidationResult {
+        if (previous.paragraphs.size != originalParagraphs.size) {
+            return buildParagraphMapping(originalParagraphs, segments)
+        }
+        val start = startParagraphIndex.coerceIn(0, originalParagraphs.size)
+        if (start >= originalParagraphs.size) {
+            for (i in originalParagraphs.indices) {
+                if (originalParagraphs[i] != previous.paragraphs[i].originalParagraph) {
+                    return buildParagraphMapping(originalParagraphs, segments)
+                }
+            }
+            val used = previous.paragraphs.flatMap { it.matchedSegmentIndices }.toMutableSet()
+            val unmatched = segments.indices.filter { it !in used }.toSet()
+            return ValidationResult(
+                paragraphs = previous.paragraphs,
+                isFullyValid = previous.paragraphs.all { it.isValid } && unmatched.isEmpty(),
+                unmatchedSegmentIndices = unmatched,
+            )
+        }
+        for (i in 0 until start) {
+            if (originalParagraphs[i] != previous.paragraphs[i].originalParagraph) {
+                return buildParagraphMapping(originalParagraphs, segments)
+            }
+        }
+        val flatTokens = buildFlatSigList(segments)
+        val flatNorms = flatTokens.map { it.normalized }
+        var flatWordPos = flatCursorAfterFirstParagraphs(originalParagraphs, flatNorms, start)
+        val newMappings = ArrayList<ParagraphMapping>(originalParagraphs.size)
+        for (i in 0 until start) {
+            newMappings.add(previous.paragraphs[i])
+        }
+        val usedSegmentIndices = previous.paragraphs.take(start).flatMap { it.matchedSegmentIndices }.toMutableSet()
+        for (i in start until originalParagraphs.size) {
+            val (m, newPos) = mapOneOriginalParagraph(
+                originalParagraphs[i],
+                flatTokens,
+                flatNorms,
+                flatWordPos,
+                usedSegmentIndices,
+            )
+            flatWordPos = newPos
+            newMappings.add(m)
+        }
+        val unmatchedSegments = segments.indices.filter { it !in usedSegmentIndices }.toSet()
+        return ValidationResult(
+            paragraphs = newMappings,
+            isFullyValid = newMappings.all { it.isValid } && unmatchedSegments.isEmpty(),
+            unmatchedSegmentIndices = unmatchedSegments,
+        )
+    }
+
+    private fun flatCursorAfterFirstParagraphs(
+        originalParagraphs: List<String>,
+        flatNorms: List<String>,
+        paragraphCount: Int,
+    ): Int {
+        var flatWordPos = 0
+        val until = minOf(paragraphCount, originalParagraphs.size)
+        for (i in 0 until until) {
+            val origPara = originalParagraphs[i]
+            val strippedPara = stripMarkup(origPara)
+            val displayToks = splitCompareWhitespace(strippedPara)
+            val origSignificant = mutableListOf<OrigSigToken>()
+            displayToks.forEachIndexed { dispIdx, w ->
+                val n = normalizeCompareToken(w)
+                if (n.isNotEmpty()) origSignificant.add(OrigSigToken(dispIdx, n))
+            }
+            if (origSignificant.isEmpty()) continue
+            val origSigs = origSignificant.map { it.normalized }
+            val matchResult = tryMatchSequence(origSigs, flatNorms, flatWordPos) ?: continue
+            flatWordPos = matchResult.second
+        }
+        return flatWordPos
+    }
+
+    private fun mapOneOriginalParagraph(
+        origPara: String,
+        flatTokens: List<FlatSigToken>,
+        flatNorms: List<String>,
+        flatWordPos: Int,
+        usedSegmentIndices: MutableSet<Int>,
+    ): Pair<ParagraphMapping, Int> {
+        val strippedPara = stripMarkup(origPara)
+        val displayToks = splitCompareWhitespace(strippedPara)
+        val origSignificant = mutableListOf<OrigSigToken>()
+        displayToks.forEachIndexed { dispIdx, w ->
+            val n = normalizeCompareToken(w)
+            if (n.isNotEmpty()) origSignificant.add(OrigSigToken(dispIdx, n))
+        }
+
+        if (origSignificant.isEmpty()) {
+            return ParagraphMapping(
+                originalParagraph = origPara,
+                matchedSegmentIndices = emptyList(),
+                isValid = true,
+                extraInMarkup = emptyList(),
+                missingInMarkup = emptyList(),
+            ) to flatWordPos
+        }
+
+        val origSigs = origSignificant.map { it.normalized }
+        val matchResult = tryMatchSequence(origSigs, flatNorms, flatWordPos)
+
+        if (matchResult == null) {
+            return ParagraphMapping(
+                originalParagraph = origPara,
+                matchedSegmentIndices = emptyList(),
+                isValid = false,
+                extraInMarkup = emptyList(),
+                missingInMarkup = origSigs,
+            ) to flatWordPos
+        }
+
+        val (_, consumedUpTo) = matchResult
+        val involvedSegments = (flatWordPos until consumedUpTo)
+            .map { flatTokens[it].segmentIndex }
+            .distinct()
+            .sorted()
+        usedSegmentIndices.addAll(involvedSegments)
+
+        val markupNormSlice = flatNorms.subList(flatWordPos, consumedUpTo)
+        val matchedOrigSig = lcsIndicesA(origSigs, markupNormSlice)
+        val matchedMarkupSig = lcsIndicesB(origSigs, markupNormSlice)
+
+        val missing = origSigs.filterIndexed { i, _ -> i !in matchedOrigSig }
+        val extra = markupNormSlice.filterIndexed { i, _ -> i !in matchedMarkupSig }
+
+        val missingOriginalWordIndices = origSignificant
+            .mapIndexedNotNull { sigRank, t -> if (sigRank !in matchedOrigSig) t.displayIndex else null }
+            .toSet()
+
+        val extraMarkupSignificantWordIndicesBySegment = mutableMapOf<Int, MutableSet<Int>>()
+        for (i in markupNormSlice.indices) {
+            if (i !in matchedMarkupSig) {
+                val ft = flatTokens[flatWordPos + i]
+                extraMarkupSignificantWordIndicesBySegment
+                    .getOrPut(ft.segmentIndex) { mutableSetOf() }
+                    .add(ft.sigIndexInSegment)
+            }
+        }
+
+        val mapping = ParagraphMapping(
+            originalParagraph = origPara,
+            matchedSegmentIndices = involvedSegments,
+            isValid = missing.isEmpty() && extra.isEmpty(),
+            extraInMarkup = extra,
+            missingInMarkup = missing,
+            missingOriginalWordIndices = missingOriginalWordIndices,
+            extraMarkupSignificantWordIndicesBySegment = extraMarkupSignificantWordIndicesBySegment,
+        )
+        return mapping to consumedUpTo
+    }
+
     /**
      * Compare original text (as source of truth) against parsed segments.
      * [originalText] is split with [splitParagraphsForStorage]; prefer
@@ -222,102 +479,22 @@ object TextParser {
             )
         }
 
-        data class OrigSigToken(val displayIndex: Int, val normalized: String)
-        data class FlatSigToken(
-            val segmentIndex: Int,
-            val sigIndexInSegment: Int,
-            val normalized: String,
-        )
-
-        val flatTokens = mutableListOf<FlatSigToken>()
-        for ((segIdx, seg) in segments.withIndex()) {
-            val inner = stripMarkup(seg.text)
-            val toks = splitCompareWhitespace(inner)
-            var sigIdxInSeg = 0
-            for (w in toks) {
-                val n = normalizeCompareToken(w)
-                if (n.isNotEmpty()) {
-                    flatTokens.add(FlatSigToken(segIdx, sigIdxInSeg, n))
-                    sigIdxInSeg++
-                }
-            }
-        }
+        val flatTokens = buildFlatSigList(segments)
         val flatNorms = flatTokens.map { it.normalized }
 
         val usedSegmentIndices = mutableSetOf<Int>()
         var flatWordPos = 0
 
-        val mappings = originalParagraphs.mapIndexed { _, origPara ->
-            val strippedPara = stripMarkup(origPara)
-            val displayToks = splitCompareWhitespace(strippedPara)
-            val origSignificant = mutableListOf<OrigSigToken>()
-            displayToks.forEachIndexed { dispIdx, w ->
-                val n = normalizeCompareToken(w)
-                if (n.isNotEmpty()) origSignificant.add(OrigSigToken(dispIdx, n))
-            }
-
-            if (origSignificant.isEmpty()) {
-                return@mapIndexed ParagraphMapping(
-                    originalParagraph = origPara,
-                    matchedSegmentIndices = emptyList(),
-                    isValid = true,
-                    extraInMarkup = emptyList(),
-                    missingInMarkup = emptyList(),
-                )
-            }
-
-            val origSigs = origSignificant.map { it.normalized }
-            val matchResult = tryMatchSequence(origSigs, flatNorms, flatWordPos)
-
-            if (matchResult == null) {
-                ParagraphMapping(
-                    originalParagraph = origPara,
-                    matchedSegmentIndices = emptyList(),
-                    isValid = false,
-                    extraInMarkup = emptyList(),
-                    missingInMarkup = origSigs,
-                )
-            } else {
-                val (_, consumedUpTo) = matchResult
-                val involvedSegments = (flatWordPos until consumedUpTo)
-                    .map { flatTokens[it].segmentIndex }
-                    .distinct()
-                    .sorted()
-                usedSegmentIndices.addAll(involvedSegments)
-
-                val markupNormSlice = flatNorms.subList(flatWordPos, consumedUpTo)
-                val matchedOrigSig = lcsIndicesA(origSigs, markupNormSlice)
-                val matchedMarkupSig = lcsIndicesB(origSigs, markupNormSlice)
-
-                val missing = origSigs.filterIndexed { i, _ -> i !in matchedOrigSig }
-                val extra = markupNormSlice.filterIndexed { i, _ -> i !in matchedMarkupSig }
-
-                val missingOriginalWordIndices = origSignificant
-                    .mapIndexedNotNull { sigRank, t -> if (sigRank !in matchedOrigSig) t.displayIndex else null }
-                    .toSet()
-
-                val extraMarkupSignificantWordIndicesBySegment = mutableMapOf<Int, MutableSet<Int>>()
-                for (i in markupNormSlice.indices) {
-                    if (i !in matchedMarkupSig) {
-                        val ft = flatTokens[flatWordPos + i]
-                        extraMarkupSignificantWordIndicesBySegment
-                            .getOrPut(ft.segmentIndex) { mutableSetOf() }
-                            .add(ft.sigIndexInSegment)
-                    }
-                }
-
-                flatWordPos = consumedUpTo
-
-                ParagraphMapping(
-                    originalParagraph = origPara,
-                    matchedSegmentIndices = involvedSegments,
-                    isValid = missing.isEmpty() && extra.isEmpty(),
-                    extraInMarkup = extra,
-                    missingInMarkup = missing,
-                    missingOriginalWordIndices = missingOriginalWordIndices,
-                    extraMarkupSignificantWordIndicesBySegment = extraMarkupSignificantWordIndicesBySegment,
-                )
-            }
+        val mappings = originalParagraphs.map { origPara ->
+            val (m, newPos) = mapOneOriginalParagraph(
+                origPara,
+                flatTokens,
+                flatNorms,
+                flatWordPos,
+                usedSegmentIndices,
+            )
+            flatWordPos = newPos
+            m
         }
 
         val unmatchedSegments = segments.indices.filter { it !in usedSegmentIndices }.toSet()

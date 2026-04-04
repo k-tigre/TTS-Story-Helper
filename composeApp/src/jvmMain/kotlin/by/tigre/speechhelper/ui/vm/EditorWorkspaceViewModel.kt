@@ -235,15 +235,37 @@ class EditorWorkspaceViewModel(
         validationResult = null
     }
 
-    fun syncSegmentsFromText() {
+    fun syncSegmentsFromText(previousMarkupForIncremental: String? = null) {
+        val cachedParas = originalParagraphsForValidation()
+        val oldValidation = validationResult
+        val newSegs = TextParser.parse(text)
         segments.clear()
-        segments.addAll(TextParser.parse(text))
+        segments.addAll(newSegs)
         val id = currentChapterId()
         if (originalText.isBlank() && hasMarkers) {
             originalText = segments.joinToString("\n\n") { it.text }
             SessionStorage.setOriginalText(id, originalText)
         }
-        revalidate()
+        validationResult = when {
+            originalText.isBlank() || !hasMarkers -> null
+            previousMarkupForIncremental != null &&
+                oldValidation != null &&
+                previousMarkupForIncremental != text &&
+                cachedParas.size == oldValidation.paragraphs.size -> {
+                val start = TextParser.findIncrementalMarkupValidationStart(
+                    previousMarkupForIncremental,
+                    text,
+                    oldValidation,
+                )
+                TextParser.buildParagraphMappingIncremental(
+                    cachedParas,
+                    newSegs,
+                    oldValidation,
+                    start,
+                )
+            }
+            else -> TextParser.buildParagraphMapping(cachedParas, newSegs)
+        }
     }
 
     fun wrapTextAsMarkup() {

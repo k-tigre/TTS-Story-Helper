@@ -268,7 +268,16 @@ class MainViewModel(
 
     fun revalidate() = editor.revalidate()
 
-    fun syncSegmentsFromText() = editor.syncSegmentsFromText()
+    fun syncSegmentsFromText(previousMarkupForIncremental: String? = null) =
+        editor.syncSegmentsFromText(previousMarkupForIncremental)
+
+    /** Быстрая инкрементальная валидация при правке разметки (без debounce). */
+    fun applyMarkupTextChange(newText: String) {
+        val prev = editor.text
+        if (prev == newText) return
+        editor.text = newText
+        editor.syncSegmentsFromText(previousMarkupForIncremental = prev)
+    }
 
     fun updateOriginalText(newOriginal: String) = editor.updateOriginalText(newOriginal)
 

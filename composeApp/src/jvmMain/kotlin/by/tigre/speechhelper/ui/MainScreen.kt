@@ -87,7 +87,6 @@ import by.tigre.speechhelper.domain.VoiceSettings
 import kotlin.math.roundToInt
 import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.distinctUntilChanged
 
@@ -125,18 +124,10 @@ fun MainScreen() {
         }
     }
 
-    // Синхронизация сегментов сырой разметки при смене главы / вкладки / режима
-    LaunchedEffect(vm.viewMode, vm.currentChapterId, vm.isLoading) {
+    // Синхронизация сегментов при смене режима (смена главы уже делает revalidate в редакторе)
+    LaunchedEffect(vm.viewMode, vm.isLoading) {
         if (vm.isLoading) return@LaunchedEffect
         vm.syncSegmentsFromText()
-    }
-
-    // Вкладка «Разметка»: отложенный parse+валидация после правок (на «Разбивке» не трогаем — там сегменты первичны)
-    LaunchedEffect(vm.currentChapterId, vm.isLoading, vm.viewMode) {
-        if (vm.isLoading || vm.viewMode != 0) return@LaunchedEffect
-        snapshotFlow { vm.text to vm.originalText }
-            .debounce(400)
-            .collectLatest { vm.syncSegmentsFromText() }
     }
 
     AppGlobalOverlays(root)
@@ -255,9 +246,7 @@ fun MainScreen() {
                             0 -> MarkupSplitView(
                                 originalText = splitOriginal,
                                 markupText = vm.text,
-                                onMarkupTextChange = { newText ->
-                                    vm.text = newText
-                                },
+                                onMarkupTextChange = { newText -> vm.applyMarkupTextChange(newText) },
                                 onOriginalTextChange = { newOriginal ->
                                     vm.updateOriginalText(newOriginal)
                                 },
