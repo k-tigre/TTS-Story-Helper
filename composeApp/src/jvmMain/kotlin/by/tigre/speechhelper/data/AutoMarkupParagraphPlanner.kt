@@ -52,6 +52,74 @@ object AutoMarkupParagraphPlanner {
                 originalLine.trim().ifBlank { TextParser.stripMarkup(markedLine).trim() }
         }
 
+    /** Непрерывные участки по индексам абзацев в документе: …, 2,3,4 | 7,8 … */
+    fun consecutiveIndexRuns(sortedIndices: List<Int>): List<List<Int>> {
+        if (sortedIndices.isEmpty()) return emptyList()
+        val runs = mutableListOf<MutableList<Int>>()
+        var cur = mutableListOf(sortedIndices.first())
+        for (k in 1 until sortedIndices.size) {
+            val v = sortedIndices[k]
+            if (v == cur.last() + 1) cur.add(v)
+            else {
+                runs.add(cur)
+                cur = mutableListOf(v)
+            }
+        }
+        runs.add(cur)
+        return runs
+    }
+
+    /**
+     * Внутри одного непрерывного run — жадно набираем батчи, пока
+     * [TextParser.joinParagraphsForStorage] источников не превышает [limit].
+     * Один абзац длиннее [limit] попадает в батч из одного индекса (разбивка на запросы — у вызывающего).
+     */
+    fun greedyBatchesWithinRun(
+        runIndices: List<Int>,
+        limit: Int,
+        originals: List<String>,
+        working: List<String>,
+        mode: AutoMarkupMode,
+    ): List<List<Int>> {
+        val batches = mutableListOf<List<Int>>()
+        var p = 0
+        while (p < runIndices.size) {
+            val i = runIndices[p]
+            val src0 = sourceTextForAi(originals[i], working[i], mode).trim()
+            if (src0.isBlank()) {
+                p++
+                continue
+            }
+            if (src0.length > limit) {
+                batches.add(listOf(i))
+                p++
+                continue
+            }
+            val batch = mutableListOf(i)
+            val sources = mutableListOf(src0)
+            p++
+            while (p < runIndices.size) {
+                val j = runIndices[p]
+                val sj = sourceTextForAi(originals[j], working[j], mode).trim()
+                if (sj.isBlank()) {
+                    p++
+                    continue
+                }
+                if (sj.length > limit) break
+                val candidate = TextParser.joinParagraphsForStorage(sources + sj)
+                if (candidate.length <= limit) {
+                    batch.add(j)
+                    sources.add(sj)
+                    p++
+                } else {
+                    break
+                }
+            }
+            batches.add(batch)
+        }
+        return batches
+    }
+
     /**
      * Разбиение одного абзаца под лимит API (несколько запросов подряд; результаты склеиваются пробелом).
      */
@@ -86,5 +154,69 @@ object AutoMarkupParagraphPlanner {
         }
         if (current.isNotBlank()) chunks.add(current.toString().trim())
         return chunks.ifEmpty { listOf(text) }
+    }
+
+    /**
+     * Оценка числа HTTP-запросов разметки: жадные пакеты + нарезка одного длинного абзаца на части.
+     * [working] — снимок на начало главы (как при реальном планировании батчей).
+     */
+    fun estimateHttpCallsForChapter(
+        indices: List<Int>,
+        chunkLimit: Int,
+        originals: List<String>,
+        working: List<String>,
+        mode: AutoMarkupMode,
+    ): Int {
+        if (indices.isEmpty()) return 0
+        val runs = consecutiveIndexRuns(indices.sorted())
+        var total = 0
+        for (run in runs) {
+            var pending = run.toMutableList()
+            while (pending.isNotEmpty()) {
+                val planned = greedyBatchesWithinRun(pending, chunkLimit, originals, working, mode)
+                if (planned.isEmpty()) {
+                    pending.removeAt(0)
+                    continue
+                }
+                val batch = planned[0]
+                val sources = batch.map { idx ->
+                    sourceTextForAi(originals[idx], working[idx], mode).trim()
+                }
+                val joined = TextParser.joinParagraphsForStorage(sources)
+                total += if (batch.size == 1 && joined.length > chunkLimit) {
+                    splitParagraphChunks(joined, chunkLimit).size
+                } else {
+                    1
+                }
+                pending.removeAll { it in batch.toSet() }
+            }
+        }
+        return total
+    }
+
+    /** Число жадных пакетов (без учёта доп. запросов по длинному абзацу). */
+    fun estimateGreedyBatchCountForChapter(
+        indices: List<Int>,
+        chunkLimit: Int,
+        originals: List<String>,
+        working: List<String>,
+        mode: AutoMarkupMode,
+    ): Int {
+        if (indices.isEmpty()) return 0
+        val runs = consecutiveIndexRuns(indices.sorted())
+        var count = 0
+        for (run in runs) {
+            var pending = run.toMutableList()
+            while (pending.isNotEmpty()) {
+                val planned = greedyBatchesWithinRun(pending, chunkLimit, originals, working, mode)
+                if (planned.isEmpty()) {
+                    pending.removeAt(0)
+                    continue
+                }
+                count++
+                pending.removeAll { it in planned[0].toSet() }
+            }
+        }
+        return count
     }
 }

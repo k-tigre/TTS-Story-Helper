@@ -5,6 +5,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import by.tigre.speechhelper.TokenStorage
 import by.tigre.speechhelper.data.AiMarkupApi
+import by.tigre.speechhelper.data.AutoMarkupBatchAlign
 import by.tigre.speechhelper.data.AutoMarkupFingerprint
 import by.tigre.speechhelper.data.AutoMarkupParagraphPlanner
 import by.tigre.speechhelper.data.MarkupResult
@@ -756,6 +757,13 @@ class MainViewModel(
         markupProgressJob = scope.launch {
             try {
                 saveCurrentChapter()
+                val plan = buildAutoMarkupJobPlan(chapterIds, mode, null)
+                if (plan == null) {
+                    statusMessage = "Авто-разметка: нечего размечать"
+                    return@launch
+                }
+                val progress = AutoMarkupProgressTracker(chapterIds.size, plan)
+                progressMessage = progress.formatLine(0, "")
                 val errors = mutableListOf<String>()
                 val voicesAcc = SessionStorage.voiceMapping.keys.toMutableSet()
                 for ((index, id) in chapterIds.withIndex()) {
@@ -770,6 +778,7 @@ class MainViewModel(
                             errors = errors,
                             voicesAcc = voicesAcc,
                             llmConfig = null,
+                            progress = progress,
                         )
                     } catch (e: CancellationException) {
                         throw e
@@ -801,6 +810,80 @@ class MainViewModel(
         }
     }
 
+    private data class AutoMarkupJobPlan(val totalParagraphs: Int, val totalHttpCalls: Int)
+
+    private class AutoMarkupProgressTracker(
+        private val totalChapters: Int,
+        private val plan: AutoMarkupJobPlan,
+    ) {
+        var httpCompleted = 0
+            private set
+        var paragraphsCompleted = 0
+            private set
+
+        fun onHttpCompleted() {
+            httpCompleted++
+        }
+
+        fun onParagraphsCompleted(n: Int) {
+            paragraphsCompleted += n
+        }
+
+        fun formatLine(chapterIndex: Int, detail: String): String {
+            val hp = plan.totalHttpCalls
+            val h = httpCompleted
+            val httpPart = if (h <= hp) "$h/$hp" else "$h/$hp+"
+            return buildString {
+                append("Авто-разметка")
+                if (totalChapters > 1) {
+                    append(" · глава ")
+                    append(chapterIndex + 1)
+                    append("/")
+                    append(totalChapters)
+                }
+                append(" · запросы ")
+                append(httpPart)
+                append(" · абзацы ")
+                append(paragraphsCompleted)
+                append("/")
+                append(plan.totalParagraphs)
+                if (detail.isNotBlank()) {
+                    append(" · ")
+                    append(detail)
+                }
+            }
+        }
+    }
+
+    private fun buildAutoMarkupJobPlan(
+        chapterIds: List<String>,
+        mode: AutoMarkupMode,
+        llmConfig: LlmConfig?,
+    ): AutoMarkupJobPlan? {
+        val chunkLimit = llmConfig?.markupChunkChars ?: AiMarkupApi.DEFAULT_YANDEX_MARKUP_CHUNK_CHARS
+        var totalParas = 0
+        var totalHttp = 0
+        for (id in chapterIds) {
+            if (SessionStorage.getChapterText(id).isBlank()) continue
+            val rows = AutoMarkupParagraphPlanner.rowsOrSingleFallback(
+                SessionStorage.listChapterParagraphs(id),
+                SessionStorage.getOriginalText(id),
+                SessionStorage.getChapterText(id),
+            )
+            if (rows.isEmpty()) continue
+            val originals = rows.map { it.originalText }
+            val working = rows.map { it.markedText }
+            val indices = AutoMarkupParagraphPlanner.paragraphIndicesToProcess(mode, rows)
+            if (indices.isEmpty()) continue
+            totalParas += indices.size
+            totalHttp += AutoMarkupParagraphPlanner.estimateHttpCallsForChapter(
+                indices, chunkLimit, originals, working, mode,
+            )
+        }
+        if (totalParas == 0) return null
+        return AutoMarkupJobPlan(totalParas, totalHttp.coerceAtLeast(1))
+    }
+
     private fun chapterWord(n: Int): String =
         when {
             n % 10 == 1 && n % 100 != 11 -> "глава"
@@ -818,6 +901,13 @@ class MainViewModel(
         markupProgressJob = scope.launch {
             try {
                 saveCurrentChapter()
+                val plan = buildAutoMarkupJobPlan(chapterIds, mode, config)
+                if (plan == null) {
+                    statusMessage = "Авто-разметка: нечего размечать"
+                    return@launch
+                }
+                val progress = AutoMarkupProgressTracker(chapterIds.size, plan)
+                progressMessage = progress.formatLine(0, "")
                 val errors = mutableListOf<String>()
                 val voicesAcc = SessionStorage.voiceMapping.keys.toMutableSet()
                 for ((index, id) in chapterIds.withIndex()) {
@@ -832,6 +922,7 @@ class MainViewModel(
                             errors = errors,
                             voicesAcc = voicesAcc,
                             llmConfig = config,
+                            progress = progress,
                         )
                     } catch (e: CancellationException) {
                         throw e
@@ -871,6 +962,7 @@ class MainViewModel(
         errors: MutableList<String>,
         voicesAcc: MutableSet<String>,
         llmConfig: LlmConfig?,
+        progress: AutoMarkupProgressTracker?,
     ) {
         yield()
         val rows = AutoMarkupParagraphPlanner.rowsOrSingleFallback(
@@ -888,59 +980,166 @@ class MainViewModel(
         val token = TokenStorage.iamToken
         val folderId = TokenStorage.folderId
 
-        for ((pi, i) in indices.withIndex()) {
-            yield()
-            val sourceFull = AutoMarkupParagraphPlanner.sourceTextForAi(originals[i], working[i], mode)
-            if (sourceFull.isBlank()) continue
-            val fingerprintHex = AutoMarkupFingerprint.sha256Hex(sourceFull)
+        val greedyBatchesInChapter = AutoMarkupParagraphPlanner.estimateGreedyBatchCountForChapter(
+            indices, chunkLimit, originals, working, mode,
+        ).coerceAtLeast(1)
+
+        suspend fun callMarkupChunk(joined: String, systemPrompt: String, detailAfter: String): String {
+            val marked = if (llmConfig != null) {
+                OpenAiMarkupApi.markupChunkForPrompt(joined, llmConfig, systemPrompt)
+            } else {
+                AiMarkupApi.markupChunkForPrompt(joined, token, folderId, systemPrompt)
+            }
+            progress?.apply {
+                onHttpCompleted()
+                progressMessage = formatLine(chapterIndex, detailAfter)
+            }
+            return marked
+        }
+
+        suspend fun persistAfterBatch(
+            fingerprints: List<Pair<Int, String>>,
+            detailAfter: String,
+        ) {
+            val pairs = originals.zip(working) { o, m -> o to m }
+            SessionStorage.replaceAllParagraphsForChapter(chapterId, pairs)
+            for ((paraIdx, fp) in fingerprints) {
+                SessionStorage.saveAutoMarkupSourceFingerprint(chapterId, rows[paraIdx].ordinal, fp)
+            }
+            mergeDiscoveredVoicesIntoBook(voicesAcc)
+            applyChapterMarkupToEditorIfCurrent(chapterId, originals, working, voicesAcc)
+            progress?.apply {
+                onParagraphsCompleted(fingerprints.size)
+                progressMessage = formatLine(chapterIndex, detailAfter)
+            }
+        }
+
+        suspend fun trySingleParagraphSubchunks(
+            i: Int,
+            sourceFull: String,
+            fingerprintHex: String,
+            contextDetail: String,
+        ): Exception? {
             val chunks = AutoMarkupParagraphPlanner.splitParagraphChunks(sourceFull, chunkLimit)
             val subResults = mutableListOf<String>()
-            var fail: Exception? = null
             for ((ci, chunk) in chunks.withIndex()) {
                 yield()
-                progressMessage = buildString {
-                    append("Авто-разметка · глава ")
-                    append(chapterIndex + 1)
-                    append("/")
-                    append(totalChapters)
-                    append(" · абзац ")
-                    append(pi + 1)
-                    append("/")
-                    append(indices.size)
-                    if (chunks.size > 1) {
-                        append(" · часть ")
-                        append(ci + 1)
-                        append("/")
-                        append(chunks.size)
-                    }
-                }
+                val partDetail =
+                    if (chunks.size > 1) "$contextDetail · часть ${ci + 1}/${chunks.size}" else contextDetail
+                progressMessage = progress?.formatLine(chapterIndex, partDetail) ?: partDetail
                 val systemPrompt = MarkupSystemPrompts.autoMarkupPrompt(voicesAcc)
                 try {
-                    val marked = if (llmConfig != null) {
-                        OpenAiMarkupApi.markupChunkForPrompt(chunk, llmConfig, systemPrompt)
-                    } else {
-                        AiMarkupApi.markupChunkForPrompt(chunk, token, folderId, systemPrompt)
-                    }
+                    val marked = callMarkupChunk(chunk, systemPrompt, partDetail)
                     subResults.add(marked)
                     voicesAcc.addAll(TextParser.extractVoiceNames(marked))
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: Exception) {
-                    fail = e
-                    break
+                    return e
                 }
             }
-            if (fail != null) {
-                val label = library.chapters.find { it.id == chapterId }?.name ?: chapterId
-                errors.add("$label, абз. ${i + 1}: ${fail.message}")
-                continue
-            }
             working[i] = subResults.joinToString(" ").trim()
-            val pairs = originals.zip(working) { o, m -> o to m }
-            SessionStorage.replaceAllParagraphsForChapter(chapterId, pairs)
-            SessionStorage.saveAutoMarkupSourceFingerprint(chapterId, rows[i].ordinal, fingerprintHex)
-            mergeDiscoveredVoicesIntoBook(voicesAcc)
-            applyChapterMarkupToEditorIfCurrent(chapterId, originals, working, voicesAcc)
+            persistAfterBatch(listOf(i to fingerprintHex), contextDetail)
+            return null
+        }
+
+        suspend fun processBatchWithFallback(batch: List<Int>, packDetail: String) {
+            val sources = batch.map {
+                AutoMarkupParagraphPlanner.sourceTextForAi(originals[it], working[it], mode).trim()
+            }
+            val fingerprints = batch.mapIndexed { k, paraIdx ->
+                paraIdx to AutoMarkupFingerprint.sha256Hex(sources[k])
+            }
+            val joined = TextParser.joinParagraphsForStorage(sources)
+
+            val systemPrompt = MarkupSystemPrompts.autoMarkupPrompt(voicesAcc)
+            try {
+                if (batch.size == 1) {
+                    val i = batch[0]
+                    if (joined.length <= chunkLimit) {
+                        val marked = callMarkupChunk(joined, systemPrompt, packDetail)
+                        voicesAcc.addAll(TextParser.extractVoiceNames(marked))
+                        working[i] = marked.trim()
+                        persistAfterBatch(listOf(i to fingerprints[0].second), packDetail)
+                    } else {
+                        trySingleParagraphSubchunks(i, sources[0], fingerprints[0].second, packDetail)?.let { throw it }
+                    }
+                    return
+                }
+
+                val markedJoined = callMarkupChunk(joined, systemPrompt, packDetail)
+                voicesAcc.addAll(TextParser.extractVoiceNames(markedJoined))
+                val aligned = AutoMarkupBatchAlign.alignOrNull(sources, markedJoined)
+                if (aligned != null) {
+                    for (k in batch.indices) {
+                        working[batch[k]] = aligned[k].trim()
+                        voicesAcc.addAll(TextParser.extractVoiceNames(aligned[k]))
+                    }
+                    persistAfterBatch(fingerprints, packDetail)
+                } else {
+                    for (k in batch.indices) {
+                        val i = batch[k]
+                        val src = sources[k]
+                        if (src.isBlank()) continue
+                        val fp = fingerprints[k].second
+                        val fb = "$packDetail · абз. ${i + 1} (отдельно)"
+                        progressMessage = progress?.formatLine(chapterIndex, fb) ?: fb
+                        if (src.length <= chunkLimit) {
+                            try {
+                                val onePrompt = MarkupSystemPrompts.autoMarkupPrompt(voicesAcc)
+                                val one = callMarkupChunk(src, onePrompt, fb)
+                                voicesAcc.addAll(TextParser.extractVoiceNames(one))
+                                working[i] = one.trim()
+                                persistAfterBatch(listOf(i to fp), fb)
+                            } catch (e: CancellationException) {
+                                throw e
+                            } catch (e: Exception) {
+                                val label = library.chapters.find { it.id == chapterId }?.name ?: chapterId
+                                errors.add("$label, абз. ${i + 1}: ${e.message}")
+                            }
+                        } else {
+                            trySingleParagraphSubchunks(i, src, fp, fb)?.let { e ->
+                                val label = library.chapters.find { it.id == chapterId }?.name ?: chapterId
+                                errors.add("$label, абз. ${i + 1}: ${e.message}")
+                            }
+                        }
+                    }
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                val label = library.chapters.find { it.id == chapterId }?.name ?: chapterId
+                errors.add("$label, пакет $packDetail: ${e.message}")
+            }
+        }
+
+        val runs = AutoMarkupParagraphPlanner.consecutiveIndexRuns(indices.sorted())
+        var batchNum = 0
+        for (run in runs) {
+            var pending = run.toMutableList()
+            while (pending.isNotEmpty()) {
+                yield()
+                val planned = AutoMarkupParagraphPlanner.greedyBatchesWithinRun(
+                    pending,
+                    chunkLimit,
+                    originals,
+                    working,
+                    mode,
+                )
+                if (planned.isEmpty()) {
+                    pending.removeAt(0)
+                    continue
+                }
+                val batch = planned[0]
+                batchNum++
+                val a = batch.minOf { it } + 1
+                val b = batch.maxOf { it } + 1
+                val batchLabel = if (batch.size == 1) "абз. $a" else "абз. $a–$b (${batch.size} шт.)"
+                val packDetail = "пакет $batchNum/$greedyBatchesInChapter · $batchLabel"
+                progressMessage = progress?.formatLine(chapterIndex, packDetail) ?: packDetail
+                processBatchWithFallback(batch, packDetail)
+                pending.removeAll { it in batch.toSet() }
+            }
         }
     }
 
