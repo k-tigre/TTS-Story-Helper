@@ -108,7 +108,8 @@ fun MainScreen() {
 
     // Local TextFieldValue for cursor control (Home/End/PageUp/PageDown)
     var textFieldValue by remember { mutableStateOf(TextFieldValue(vm.text)) }
-    LaunchedEffect(vm.text) {
+    LaunchedEffect(vm.text, vm.isLoading) {
+        if (vm.isLoading) return@LaunchedEffect
         if (textFieldValue.text != vm.text) {
             textFieldValue = textFieldValue.copy(text = vm.text)
         }
@@ -122,7 +123,8 @@ fun MainScreen() {
     }
 
     // Ensure voice mappings for all detected voices
-    LaunchedEffect(vm.detectedVoices) {
+    LaunchedEffect(vm.detectedVoices, vm.isLoading) {
+        if (vm.isLoading) return@LaunchedEffect
         vm.ensureVoiceMappings(vm.detectedVoices)
     }
 
@@ -156,7 +158,8 @@ fun MainScreen() {
     }
 
     // Sync segments when switching to segment view or split view
-    LaunchedEffect(vm.viewMode, vm.currentChapterId, vm.markupModeEnabled) {
+    LaunchedEffect(vm.viewMode, vm.currentChapterId, vm.markupModeEnabled, vm.isLoading) {
+        if (vm.isLoading) return@LaunchedEffect
         if (vm.viewMode == 1 || (vm.viewMode == 0 && vm.markupModeEnabled)) vm.syncSegmentsFromText()
     }
 
@@ -437,14 +440,29 @@ fun MainScreen() {
                 modifier = Modifier.weight(1f),
                 horizontalArrangement = Arrangement.spacedBy(12.dp),
             ) {
-                if (vm.viewMode == 0 || !vm.markupModeEnabled) {
+                val detectedVoicesForUi = if (vm.isLoading) emptySet() else vm.detectedVoices
+                if (vm.isLoading) {
+                    Box(
+                        modifier = Modifier.weight(1f).fillMaxHeight(),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Text(
+                            text = "Подождите…",
+                            style = MaterialTheme.typography.bodyLarge,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                } else if (vm.viewMode == 0 || !vm.markupModeEnabled) {
                     if (vm.markupModeEnabled) {
+                        val splitOriginal = remember(vm.originalText, vm.text) {
+                            vm.originalText.ifBlank {
+                                TextParser.parse(vm.text).joinToString("\n\n") { it.text }
+                            }
+                        }
                         Column(modifier = Modifier.weight(1f).fillMaxHeight()) {
                             // Split view: original text | raw markup (editable)
                             MarkupSplitView(
-                                originalText = vm.originalText.ifBlank {
-                                    TextParser.parse(vm.text).joinToString("\n\n") { it.text }
-                                },
+                                originalText = splitOriginal,
                                 markupText = vm.text,
                                 onMarkupTextChange = { newText ->
                                     vm.text = newText
@@ -527,12 +545,12 @@ fun MainScreen() {
 
                 // Voice mapping panel (always visible)
                 val allVoiceNames = if (vm.markupModeEnabled) {
-                    (vm.detectedVoices + vm.voiceMapping.keys).toList()
-                        .sortedWith(compareByDescending<String> { it in vm.detectedVoices }.thenBy { it })
+                    (detectedVoicesForUi + vm.voiceMapping.keys).toList()
+                        .sortedWith(compareByDescending<String> { it in detectedVoicesForUi }.thenBy { it })
                 } else {
                     listOf("voice_main")
                 }
-                val activeVoiceNames = if (vm.markupModeEnabled) vm.detectedVoices else setOf("voice_main")
+                val activeVoiceNames = if (vm.markupModeEnabled) detectedVoicesForUi else setOf("voice_main")
                 VoiceMappingPanel(
                     synthesisBackend = vm.synthesisBackend,
                     voiceNames = allVoiceNames,

@@ -40,6 +40,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 import javax.swing.JFileChooser
+import javax.swing.SwingUtilities
 import javax.swing.filechooser.FileNameExtensionFilter
 
 private sealed interface ImportBackgroundResult {
@@ -368,6 +369,12 @@ class MainViewModel(private val scope: CoroutineScope) {
         }
     }
 
+    private fun postImportProgress(message: String) {
+        SwingUtilities.invokeLater {
+            progressMessage = message
+        }
+    }
+
     private suspend fun importParsedBook(label: String, parse: suspend () -> ParsedBook) {
         val chapterIdSnapshot = currentChapterId
         val textSnapshot = text
@@ -382,13 +389,11 @@ class MainViewModel(private val scope: CoroutineScope) {
                 withContext(SessionStorage.databaseDispatcher) {
                     SessionStorage.setChapterText(chapterIdSnapshot, textSnapshot)
                 }
-                withContext(Dispatchers.Main) {
-                    progressMessage = "Подготовка текста..."
+                postImportProgress("Подготовка текста…")
+                val prepared = withContext(Dispatchers.Default) {
+                    book.preparedForStorage()
                 }
-                val prepared = book.preparedForStorage()
-                withContext(Dispatchers.Main) {
-                    progressMessage = "Запись в базу..."
-                }
+                postImportProgress("Запись в базу…")
                 val result = withContext(SessionStorage.databaseDispatcher) {
                     SessionStorage.applyImportedBookPrepared(book.title, prepared)
                 }
