@@ -110,7 +110,8 @@ class MainViewModel(private val scope: CoroutineScope) {
 
     // View mode: 0 = Text, 1 = Segments
     var viewMode by mutableStateOf(0)
-    var markupModeEnabled by mutableStateOf(false)
+    /** UI редактора всегда в виде «оригинал + разметка / разбивка»; флаг оставлен для совместимости вызовов. */
+    var markupModeEnabled by mutableStateOf(true)
     private var textHadOriginalMarkup = false
     val segments = mutableStateListOf<TextSegment>()
 
@@ -251,7 +252,7 @@ class MainViewModel(private val scope: CoroutineScope) {
         originalText = snap.originalJoined
         chapterAudioPath = snap.audioPath
         statusMessage = ""
-        markupModeEnabled = originalText.isNotBlank() && hasMarkers
+        markupModeEnabled = true
         ensureVoiceMain()
         segmentViewVoiceFilter = SegmentViewVoiceFilter.All
         revalidate(preloadedOriginalParagraphs = snap.originalParagraphs)
@@ -280,6 +281,9 @@ class MainViewModel(private val scope: CoroutineScope) {
         originalText = SessionStorage.getOriginalText(newId)
         chapterAudioPath = SessionStorage.getChapterAudioPath(newId)
         segmentViewVoiceFilter = SegmentViewVoiceFilter.All
+        markupModeEnabled = true
+        ensureVoiceMain()
+        revalidate()
         showDeleteDialog = false
     }
 
@@ -297,6 +301,9 @@ class MainViewModel(private val scope: CoroutineScope) {
         synthesisBackend = SessionStorage.synthesisBackend
         localTtsSettings = SessionStorage.localTtsSettings
         segmentViewVoiceFilter = SegmentViewVoiceFilter.All
+        markupModeEnabled = true
+        ensureVoiceMain()
+        revalidate()
         statusMessage = "Всё очищено"
         showClearAllDialog = false
     }
@@ -336,6 +343,9 @@ class MainViewModel(private val scope: CoroutineScope) {
             voiceMapping.putAll(SessionStorage.voiceMapping)
             currentBookName = SessionStorage.currentBookTitle()
             segmentViewVoiceFilter = SegmentViewVoiceFilter.All
+            markupModeEnabled = true
+            ensureVoiceMain()
+            revalidate()
             statusMessage = "Открыта \"" + currentBookName + "\""
         } else {
             statusMessage = "Ошибка: не удалось открыть книгу"
@@ -419,7 +429,7 @@ class MainViewModel(private val scope: CoroutineScope) {
                     voiceMapping.clear()
                     currentBookName = result.bookTitle
                     segmentViewVoiceFilter = SegmentViewVoiceFilter.All
-                    markupModeEnabled = originalText.isNotBlank() && hasMarkers
+                    markupModeEnabled = true
                     ensureVoiceMain()
                     revalidate(preloadedOriginalParagraphs = snap.originalParagraphs)
                     statusMessage =
@@ -700,7 +710,7 @@ class MainViewModel(private val scope: CoroutineScope) {
         text = if (originalText.isNotBlank()) originalText
                else TextParser.parse(text).joinToString("\n\n") { it.text }
         saveCurrentChapter()
-        markupModeEnabled = false
+        markupModeEnabled = true
         viewMode = 0
         validationResult = null
         showResetMarkupDialog = false
@@ -748,7 +758,7 @@ class MainViewModel(private val scope: CoroutineScope) {
             SessionStorage.setOriginalText(currentChapterId, "")
             saveCurrentChapter()
         }
-        markupModeEnabled = false
+        markupModeEnabled = true
         viewMode = 0
         validationResult = null
     }

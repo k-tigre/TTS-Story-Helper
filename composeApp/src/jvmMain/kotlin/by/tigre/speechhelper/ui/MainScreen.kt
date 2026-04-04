@@ -109,15 +109,6 @@ fun MainScreen() {
         }
     }
 
-    // Local TextFieldValue for cursor control (Home/End/PageUp/PageDown)
-    var textFieldValue by remember { mutableStateOf(TextFieldValue(vm.text)) }
-    LaunchedEffect(vm.text, vm.isLoading) {
-        if (vm.isLoading) return@LaunchedEffect
-        if (textFieldValue.text != vm.text) {
-            textFieldValue = textFieldValue.copy(text = vm.text)
-        }
-    }
-
     // Auto-save text (debounced)
     LaunchedEffect(vm.currentChapterId) {
         snapshotFlow { vm.text }
@@ -161,14 +152,14 @@ fun MainScreen() {
     }
 
     // Синхронизация сегментов сырой разметки при смене главы / вкладки / режима
-    LaunchedEffect(vm.viewMode, vm.currentChapterId, vm.markupModeEnabled, vm.isLoading) {
+    LaunchedEffect(vm.viewMode, vm.currentChapterId, vm.isLoading) {
         if (vm.isLoading) return@LaunchedEffect
-        if (vm.viewMode == 1 || (vm.viewMode == 0 && vm.markupModeEnabled)) vm.syncSegmentsFromText()
+        vm.syncSegmentsFromText()
     }
 
     // Вкладка «Разметка»: отложенный parse+валидация после правок (на «Разбивке» не трогаем — там сегменты первичны)
-    LaunchedEffect(vm.currentChapterId, vm.markupModeEnabled, vm.isLoading, vm.viewMode) {
-        if (vm.isLoading || !vm.markupModeEnabled || vm.viewMode != 0) return@LaunchedEffect
+    LaunchedEffect(vm.currentChapterId, vm.isLoading, vm.viewMode) {
+        if (vm.isLoading || vm.viewMode != 0) return@LaunchedEffect
         snapshotFlow { vm.text to vm.originalText }
             .debounce(400)
             .collectLatest { vm.syncSegmentsFromText() }
@@ -422,27 +413,24 @@ fun MainScreen() {
                 .fillMaxSize(),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            // View mode toggle (only in markup mode)
-            if (vm.markupModeEnabled) {
-                PrimaryTabRow(
-                    selectedTabIndex = vm.viewMode,
-                    modifier = Modifier.width(300.dp),
+            PrimaryTabRow(
+                selectedTabIndex = vm.viewMode,
+                modifier = Modifier.width(300.dp),
+            ) {
+                Tab(
+                    selected = vm.viewMode == 0,
+                    onClick = {
+                        if (vm.viewMode == 1) vm.syncTextFromSegments()
+                        vm.viewMode = 0
+                    },
                 ) {
-                    Tab(
-                        selected = vm.viewMode == 0,
-                        onClick = {
-                            if (vm.viewMode == 1) vm.syncTextFromSegments()
-                            vm.viewMode = 0
-                        },
-                    ) {
-                        Text("Разметка", modifier = Modifier.padding(vertical = 8.dp))
-                    }
-                    Tab(
-                        selected = vm.viewMode == 1,
-                        onClick = { vm.viewMode = 1 },
-                    ) {
-                        Text("Разбивка", modifier = Modifier.padding(vertical = 8.dp))
-                    }
+                    Text("Разметка", modifier = Modifier.padding(vertical = 8.dp))
+                }
+                Tab(
+                    selected = vm.viewMode == 1,
+                    onClick = { vm.viewMode = 1 },
+                ) {
+                    Text("Разбивка", modifier = Modifier.padding(vertical = 8.dp))
                 }
             }
 
@@ -462,36 +450,6 @@ fun MainScreen() {
                             style = MaterialTheme.typography.bodyLarge,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
-                    }
-                } else if (!vm.markupModeEnabled) {
-                    Column(modifier = Modifier.weight(1f).fillMaxHeight()) {
-                        OutlinedTextField(
-                            value = textFieldValue,
-                            onValueChange = { newValue ->
-                                textFieldValue = newValue
-                                vm.text = newValue.text
-                            },
-                            label = { Text("Текст для озвучивания") },
-                            modifier = Modifier.fillMaxWidth().weight(1f)
-                                .onPreviewKeyEvent { event ->
-                                    handleEditorKeys(event, textFieldValue) { newValue ->
-                                        textFieldValue = newValue
-                                        vm.text = newValue.text
-                                    }
-                                },
-                            minLines = 5,
-                        )
-                        if (vm.text.isNotBlank()) {
-                            OutlinedButton(
-                                onClick = {
-                                    if (vm.hasMarkers) vm.enableMarkupMode()
-                                    else vm.wrapTextAsMarkup()
-                                },
-                                modifier = Modifier.padding(top = 8.dp),
-                            ) {
-                                Text("Режим разметки")
-                            }
-                        }
                     }
                 } else {
                     val splitOriginal = remember(vm.originalText, vm.text) {
@@ -546,13 +504,9 @@ fun MainScreen() {
                 }
 
                 // Voice mapping panel (always visible)
-                val allVoiceNames = if (vm.markupModeEnabled) {
-                    (detectedVoicesForUi + vm.voiceMapping.keys).toList()
-                        .sortedWith(compareByDescending<String> { it in detectedVoicesForUi }.thenBy { it })
-                } else {
-                    listOf("voice_main")
-                }
-                val activeVoiceNames = if (vm.markupModeEnabled) detectedVoicesForUi else setOf("voice_main")
+                val allVoiceNames = (detectedVoicesForUi + vm.voiceMapping.keys).toList()
+                    .sortedWith(compareByDescending<String> { it in detectedVoicesForUi }.thenBy { it })
+                val activeVoiceNames = if (vm.hasMarkers) detectedVoicesForUi else setOf("voice_main")
                 VoiceMappingPanel(
                     synthesisBackend = vm.synthesisBackend,
                     voiceNames = allVoiceNames,
@@ -678,7 +632,7 @@ fun MainScreen() {
                         }
                         vm.launchAutoMarkup()
                     },
-                    enabled = vm.text.isNotBlank() && !vm.isLoading && !vm.markupModeEnabled,
+                    enabled = vm.text.isNotBlank() && !vm.isLoading && !vm.hasMarkers,
                 ) {
                     Text("Авто-разметка")
                 }
@@ -698,37 +652,35 @@ fun MainScreen() {
                     )
                 }
 
-                if (vm.markupModeEnabled) {
-                    OutlinedButton(
-                        onClick = {
-                            if (vm.synthesisBackend == SynthesisBackend.Cloud && !TokenStorage.hasCredentials()) {
-                                showTokenDialog = true
-                                return@OutlinedButton
-                            }
-                            if (vm.viewMode == 1) vm.syncTextFromSegments()
-                            vm.launchMultiVoiceSynthesis()
-                        },
-                        enabled = vm.text.isNotBlank() && !vm.isLoading,
-                    ) {
-                        Text("Повторить ошибки")
-                    }
+                OutlinedButton(
+                    onClick = {
+                        if (vm.synthesisBackend == SynthesisBackend.Cloud && !TokenStorage.hasCredentials()) {
+                            showTokenDialog = true
+                            return@OutlinedButton
+                        }
+                        if (vm.viewMode == 1) vm.syncTextFromSegments()
+                        vm.launchMultiVoiceSynthesis()
+                    },
+                    enabled = vm.text.isNotBlank() && !vm.isLoading && vm.hasMarkers,
+                ) {
+                    Text("Повторить ошибки")
+                }
 
-                    TextButton(
-                        onClick = { vm.clearCache() },
-                        enabled = !vm.isLoading,
-                    ) {
-                        Text("Очистить кэш")
-                    }
+                TextButton(
+                    onClick = { vm.clearCache() },
+                    enabled = !vm.isLoading,
+                ) {
+                    Text("Очистить кэш")
+                }
 
-                    OutlinedButton(
-                        onClick = { vm.showResetMarkupDialog = true },
-                        enabled = !vm.isLoading,
-                        colors = androidx.compose.material3.ButtonDefaults.outlinedButtonColors(
-                            contentColor = MaterialTheme.colorScheme.error
-                        ),
-                    ) {
-                        Text("Сбросить разметку")
-                    }
+                OutlinedButton(
+                    onClick = { vm.showResetMarkupDialog = true },
+                    enabled = !vm.isLoading,
+                    colors = androidx.compose.material3.ButtonDefaults.outlinedButtonColors(
+                        contentColor = MaterialTheme.colorScheme.error
+                    ),
+                ) {
+                    Text("Сбросить разметку")
                 }
             }
 
