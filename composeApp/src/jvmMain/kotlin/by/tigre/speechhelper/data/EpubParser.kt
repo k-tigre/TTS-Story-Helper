@@ -13,7 +13,7 @@ object EpubParser {
             // 1. Find container.xml → get path to content.opf
             val containerEntry = zip.getEntry("META-INF/container.xml")
                 ?: error("META-INF/container.xml not found")
-            val containerXml = zip.getInputStream(containerEntry).use { it.readBytes().toString(Charsets.UTF_8) }
+            val containerXml = zip.getInputStream(containerEntry).use { decodeBytesWithDeclaredCharset(it.readBytes()) }
             val opfPath = Jsoup.parse(containerXml).selectFirst("rootfile")
                 ?.attr("full-path")
                 ?: error("rootfile not found in container.xml")
@@ -22,7 +22,7 @@ object EpubParser {
 
             // 2. Parse content.opf → title + spine order
             val opfEntry = zip.getEntry(opfPath) ?: error("$opfPath not found in epub")
-            val opfXml = zip.getInputStream(opfEntry).use { it.readBytes().toString(Charsets.UTF_8) }
+            val opfXml = zip.getInputStream(opfEntry).use { decodeBytesWithDeclaredCharset(it.readBytes()) }
             val opfDoc = Jsoup.parse(opfXml)
 
             val title = opfDoc.selectFirst("metadata > dc\\:title, metadata > title")?.text()?.trim() ?: ""
@@ -54,7 +54,7 @@ object EpubParser {
                     println("[EpubParser] missing entry: $fullPath")
                     continue
                 }
-                val html = zip.getInputStream(entry).use { it.readBytes().toString(Charsets.UTF_8) }
+                val html = zip.getInputStream(entry).use { decodeBytesWithDeclaredCharset(it.readBytes()) }
                 val htmlDoc = Jsoup.parse(html)
 
                 val chapterTitle = htmlDoc.selectFirst("h1, h2, h3, h4")?.text()?.trim() ?: ""

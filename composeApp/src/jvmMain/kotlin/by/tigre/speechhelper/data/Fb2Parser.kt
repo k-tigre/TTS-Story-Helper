@@ -1,5 +1,6 @@
 package by.tigre.speechhelper.data
 
+import by.tigre.speechhelper.domain.TextParser
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Element
 import org.jsoup.parser.Parser
@@ -7,6 +8,14 @@ import java.io.File
 
 data class ParsedBook(val title: String, val chapters: List<ParsedChapter>)
 data class ParsedChapter(val name: String, val text: String)
+
+/** Абзацы под хранилище, посчитанные при импорте (без повторного split в БД). */
+data class PreparedImportChapter(val name: String, val markedParagraphs: List<String>)
+
+fun ParsedBook.preparedForStorage(): List<PreparedImportChapter> =
+    chapters.map { ch ->
+        PreparedImportChapter(ch.name, TextParser.splitParagraphsForStorage(ch.text))
+    }
 
 /** Вставляет название главы в начало текста, если его там ещё нет (FB2 не включает title в тело; EPUB часто уже даёт заголовок как h1). */
 internal fun chapterTextWithEmbeddedTitle(chapterName: String, bodyText: String): String {
@@ -21,7 +30,8 @@ internal fun chapterTextWithEmbeddedTitle(chapterName: String, bodyText: String)
 object Fb2Parser {
 
     fun parse(file: File): ParsedBook {
-        val doc = Jsoup.parse(file, "UTF-8", "", Parser.xmlParser())
+        val xml = decodeBytesWithDeclaredCharset(file.readBytes())
+        val doc = Jsoup.parse(xml, "", Parser.xmlParser())
 
         val title = doc.selectFirst("description > title-info > book-title")?.text()?.trim() ?: ""
         val body = doc.selectFirst("body") ?: return ParsedBook(title.ifBlank { file.nameWithoutExtension }, emptyList())

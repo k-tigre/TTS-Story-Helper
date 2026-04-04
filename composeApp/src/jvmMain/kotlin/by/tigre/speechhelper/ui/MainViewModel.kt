@@ -16,6 +16,7 @@ import by.tigre.speechhelper.data.OpenAiMarkupApi
 import by.tigre.speechhelper.data.LocalTtsApi
 import by.tigre.speechhelper.data.SessionStorage
 import by.tigre.speechhelper.data.SpeechSynthesizer
+import by.tigre.speechhelper.data.preparedForStorage
 import by.tigre.speechhelper.data.SynthesisResult
 import by.tigre.speechhelper.domain.LlmConfig
 import by.tigre.speechhelper.data.WavMerge
@@ -138,12 +139,16 @@ class MainViewModel(private val scope: CoroutineScope) {
     var validationResult by mutableStateOf<ValidationResult?>(null)
         private set
 
-    fun revalidate() {
+    /**
+     * @param preloadedOriginalParagraphs если передан (например после [SessionStorage.persistSwitchChapter]),
+     * не дергаем SQLite повторно для оригинальных абзацев.
+     */
+    fun revalidate(preloadedOriginalParagraphs: List<String>? = null) {
         validationResult = if (originalText.isNotBlank() && hasMarkers) {
             val segs = TextParser.parse(text)
             segments.clear()
             segments.addAll(segs)
-            val origParagraphs = originalParagraphsForValidation()
+            val origParagraphs = preloadedOriginalParagraphs ?: originalParagraphsForValidation()
             TextParser.buildParagraphMapping(origParagraphs, segs)
         } else {
             null
@@ -231,20 +236,18 @@ class MainViewModel(private val scope: CoroutineScope) {
 
     fun switchToChapter(id: String) {
         if (id == currentChapterId) return
-        saveCurrentChapter()
+        val snap = SessionStorage.persistSwitchChapter(currentChapterId, text, id)
         chapterPlayer.close()
         playerIsPlaying = false
         currentChapterId = id
-        SessionStorage.currentChapterId = id
-        text = SessionStorage.getChapterText(id)
-        originalText = SessionStorage.getOriginalText(id)
-        chapterAudioPath = SessionStorage.getChapterAudioPath(id)
+        text = snap.markedJoined
+        originalText = snap.originalJoined
+        chapterAudioPath = snap.audioPath
         statusMessage = ""
         markupModeEnabled = originalText.isNotBlank() && hasMarkers
         ensureVoiceMain()
         segmentViewVoiceFilter = SegmentViewVoiceFilter.All
-        revalidate()
-        chapters = SessionStorage.listChapters()
+        revalidate(preloadedOriginalParagraphs = snap.originalParagraphs)
     }
 
     fun createChapter(name: String) {
@@ -371,31 +374,33 @@ class MainViewModel(private val scope: CoroutineScope) {
                 return
             }
 
-            saveCurrentChapter()
-            withContext(Dispatchers.IO) { SessionStorage.clearAllData() }
-
-            var firstId: String? = null
-            book.chapters.forEachIndexed { index, chapter ->
-                progressMessage = "Создание главы ${index + 1} из ${book.chapters.size}..."
-                val id = withContext(Dispatchers.IO) {
-                    val id = SessionStorage.createChapter(chapter.name)
-                    SessionStorage.setChapterText(id, chapter.text)
-                    id
-                }
-                if (firstId == null) firstId = id
+            // setChapterText → SQLite блокирует вызывающий поток; не вызывать с UI (Compose main).
+            withContext(SessionStorage.databaseDispatcher) {
+                SessionStorage.setChapterText(currentChapterId, text)
+            }
+            progressMessage = "Подготовка текста..."
+            val prepared = withContext(Dispatchers.Default) { book.preparedForStorage() }
+            progressMessage = "Запись в базу..."
+            val result = withContext(SessionStorage.databaseDispatcher) {
+                SessionStorage.applyImportedBookPrepared(book.title, prepared)
             }
 
-            chapters = SessionStorage.listChapters()
-            val id = firstId ?: SessionStorage.ensureCurrentChapter()
-            currentChapterId = id
-            SessionStorage.currentChapterId = id
-            text = SessionStorage.getChapterText(id)
-            chapterAudioPath = null
+            chapterPlayer.close()
+            playerIsPlaying = false
+            chapters = result.chapters
+            currentChapterId = result.firstChapterId
+            val snap = result.initialEditor
+            text = snap.markedJoined
+            originalText = snap.originalJoined
+            chapterAudioPath = snap.audioPath
             voiceMapping.clear()
-            SessionStorage.setCurrentBookTitle(book.title)
-            currentBookName = SessionStorage.currentBookTitle()
+            currentBookName = result.bookTitle
             segmentViewVoiceFilter = SegmentViewVoiceFilter.All
-            statusMessage = "Импортировано: \"${book.title}\" (${book.chapters.size} глав)"
+            markupModeEnabled = originalText.isNotBlank() && hasMarkers
+            ensureVoiceMain()
+            revalidate(preloadedOriginalParagraphs = snap.originalParagraphs)
+            statusMessage =
+                "Добавлено в библиотеку: \"${result.bookTitle}\" (${book.chapters.size} гл.). Открыть другую — «Загрузить книгу»."
         } catch (e: Exception) {
             statusMessage = "Ошибка импорта $label: ${e.message}"
             e.printStackTrace()

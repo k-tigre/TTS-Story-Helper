@@ -42,6 +42,22 @@ data class InitialSessionSnapshot(
     val localTtsSettings: LocalTtsSettings,
 )
 
+/** Один проход БД при смене главы: метаданные + текст + абзацы для валидации. */
+data class ChapterContentSnapshot(
+    val markedJoined: String,
+    val originalJoined: String,
+    val audioPath: String?,
+    val originalParagraphs: List<String>,
+)
+
+/** Результат атомарного импорта: состояние для UI без лишних чтений. */
+data class ImportApplyResult(
+    val firstChapterId: String,
+    val initialEditor: ChapterContentSnapshot,
+    val chapters: List<ChapterInfo>,
+    val bookTitle: String,
+)
+
 object SessionStorage {
     private val utf8 = StandardCharsets.UTF_8
 
@@ -180,6 +196,39 @@ object SessionStorage {
         for ((i, p) in pairs.withIndex()) {
             chapterQueries.insertParagraph(chapterId, i.toLong(), p.first, p.second).sync()
         }
+    }
+
+    private fun SpeechHelperDatabase.snapshotChapterContent(chapterId: String): ChapterContentSnapshot {
+        val rows = chapterQueries.selectParagraphsForChapter(chapterId).executeAsList()
+            .sortedBy { it.ordinal }
+        val origParas = rows.map { it.original_text }
+        val markedJoined = TextParser.joinParagraphsForStorage(rows.map { it.marked_text })
+        val originalJoined = TextParser.joinParagraphsForStorage(origParas)
+        val audioPath = chapterQueries.selectById(chapterId).executeAsOneOrNull()?.audio_path?.trim()?.ifBlank { null }
+        return ChapterContentSnapshot(markedJoined, originalJoined, audioPath, origParas)
+    }
+
+    /** Сохраняет размеченный текст только если отличается от БД (без лишних INSERT paragraph). */
+    private fun SpeechHelperDatabase.persistMarkedChapterTextIfChanged(chapterId: String, text: String) {
+        if (chapterId.isBlank()) return
+        val row = chapterQueries.selectById(chapterId).executeAsOneOrNull() ?: return
+        val rows = chapterQueries.selectParagraphsForChapter(chapterId).executeAsList()
+            .sortedBy { it.ordinal }
+        val oldMarked = TextParser.joinParagraphsForStorage(rows.map { it.marked_text })
+        if (oldMarked == text) return
+        if (row.exported != 0L) {
+            chapterQueries.invalidateExportIfExported(chapterId).sync()
+        }
+        val newMarked = TextParser.splitParagraphsForStorage(text)
+        val o = rows.map { it.original_text }
+        if (newMarked.isEmpty() && o.isEmpty()) {
+            chapterQueries.deleteParagraphsForChapter(chapterId).sync()
+            return
+        }
+        val n = maxOf(o.size, newMarked.size)
+        val pairs = List(n) { i -> o.getOrElse(i) { "" } to newMarked.getOrElse(i) { "" } }
+        replaceChapterParagraphs(chapterId, pairs)
+        bookQueries.touchUpdatedAt(System.currentTimeMillis(), row.book_id).sync()
     }
 
     private fun metaGet(key: String): String? =
@@ -1109,22 +1158,65 @@ object SessionStorage {
 
     fun setChapterText(id: String, text: String) {
         withDb {
-            val row = chapterQueries.selectById(id).executeAsOneOrNull() ?: return@withDb
-            val oldMarked = joinedMarked(id)
-            if (oldMarked != text && row.exported != 0L) {
-                chapterQueries.invalidateExportIfExported(id).sync()
+            persistMarkedChapterTextIfChanged(id, text)
+        }
+    }
+
+    /**
+     * Атомарно: сохранить размеченный текст у [fromChapterId] (если изменился), выставить текущую главу,
+     * вернуть контент [toChapterId] одним проходом (меньше round-trip к потоку БД).
+     */
+    fun persistSwitchChapter(fromChapterId: String, editorMarkedText: String, toChapterId: String): ChapterContentSnapshot =
+        withDb {
+            persistMarkedChapterTextIfChanged(fromChapterId, editorMarkedText)
+            appMetaQueries.upsert(META_CURRENT_CHAPTER, toChapterId).sync()
+            snapshotChapterContent(toChapterId)
+        }
+
+    /**
+     * Добавляет новую книгу из импорта и переключает текущую на неё. Уже существующие книги и настройки
+     * приложения в [app_meta] не трогаем. Абзацы готовые — см. [ParsedBook.preparedForStorage].
+     */
+    fun applyImportedBookPrepared(bookTitle: String, prepared: List<PreparedImportChapter>): ImportApplyResult {
+        return withDb {
+            val title = bookTitle.trim().ifBlank { "Без названия" }
+            val bid = newBookId()
+            val now = System.currentTimeMillis()
+            bookQueries.insertBook(bid, title, now).sync()
+            appMetaQueries.upsert(META_CURRENT_BOOK_ID, bid).sync()
+
+            var firstId: String? = null
+            for (pch in prepared) {
+                val id = newChapterId()
+                if (firstId == null) firstId = id
+                chapterQueries.insertChapter(id, bid, pch.name, null, 0L, 0L, 0L).sync()
+                for ((i, marked) in pch.markedParagraphs.withIndex()) {
+                    chapterQueries.insertParagraph(id, i.toLong(), "", marked).sync()
+                }
             }
-            val newMarked = TextParser.splitParagraphsForStorage(text)
-            val oldPairs = paragraphPairs(id)
-            val o = oldPairs.map { it.first }
-            if (newMarked.isEmpty() && o.isEmpty()) {
-                chapterQueries.deleteParagraphsForChapter(id).sync()
-                return@withDb
+
+            val fid = firstId ?: run {
+                val id = newChapterId()
+                chapterQueries.insertChapter(id, bid, "Глава 1", null, 0L, 0L, 0L).sync()
+                id
             }
-            val n = maxOf(o.size, newMarked.size)
-            val pairs = List(n) { i -> o.getOrElse(i) { "" } to newMarked.getOrElse(i) { "" } }
-            replaceChapterParagraphs(id, pairs)
-            bookQueries.touchUpdatedAt(System.currentTimeMillis(), row.book_id).sync()
+            appMetaQueries.upsert(META_CURRENT_CHAPTER, fid).sync()
+
+            val chapterInfos = chapterQueries.selectAllForList(bid).executeAsList().map { row ->
+                ChapterInfo(
+                    id = row.id,
+                    name = row.name,
+                    markupDone = row.markup_done != 0L,
+                    voiceDone = row.voice_done != 0L,
+                    exported = row.exported != 0L,
+                )
+            }
+            ImportApplyResult(
+                firstChapterId = fid,
+                initialEditor = snapshotChapterContent(fid),
+                chapters = chapterInfos,
+                bookTitle = title,
+            )
         }
     }
 
@@ -1135,7 +1227,8 @@ object SessionStorage {
         withDb {
             val row = chapterQueries.selectById(id).executeAsOneOrNull() ?: return@withDb
             val oldOrig = joinedOriginal(id)
-            if (oldOrig != text && row.exported != 0L) {
+            if (oldOrig == text) return@withDb
+            if (row.exported != 0L) {
                 chapterQueries.invalidateExportIfExported(id).sync()
             }
             val newOrig = TextParser.splitParagraphsForStorage(text)
