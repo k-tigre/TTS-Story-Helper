@@ -708,8 +708,8 @@ class MainViewModel(private val scope: CoroutineScope) {
      * the corresponding text inside voice tags in the markup.
      */
     private fun syncOriginalToMarkup(oldOriginal: String, newOriginal: String, markup: String): String {
-        val oldParagraphs = oldOriginal.split(Regex("\n\\s*\n")).map { it.trim() }.filter { it.isNotBlank() }
-        val newParagraphs = newOriginal.split(Regex("\n\\s*\n")).map { it.trim() }.filter { it.isNotBlank() }
+        val oldParagraphs = TextParser.splitParagraphsForStorage(oldOriginal)
+        val newParagraphs = TextParser.splitParagraphsForStorage(newOriginal)
         var result = markup
         // For each changed paragraph, find its old content in markup and replace
         for (i in oldParagraphs.indices) {

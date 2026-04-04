@@ -1,12 +1,18 @@
 CREATE TABLE chapter (
     id TEXT NOT NULL PRIMARY KEY,
     name TEXT NOT NULL,
-    text TEXT NOT NULL DEFAULT '',
-    original_text TEXT NOT NULL DEFAULT '',
     audio_path TEXT,
     markup_done INTEGER NOT NULL DEFAULT 0,
     voice_done INTEGER NOT NULL DEFAULT 0,
     exported INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE paragraph (
+    chapter_id TEXT NOT NULL REFERENCES chapter(id) ON DELETE CASCADE,
+    ordinal INTEGER NOT NULL,
+    original_text TEXT NOT NULL DEFAULT '',
+    marked_text TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (chapter_id, ordinal)
 );
 
 selectAllForList:
@@ -19,9 +25,9 @@ SELECT *
 FROM chapter
 WHERE id = ?;
 
-insertFull:
-INSERT INTO chapter(id, name, text, original_text, audio_path, markup_done, voice_done, exported)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?);
+insertChapter:
+INSERT INTO chapter(id, name, audio_path, markup_done, voice_done, exported)
+VALUES (?, ?, ?, ?, ?, ?);
 
 deleteById:
 DELETE FROM chapter
@@ -29,16 +35,6 @@ WHERE id = ?;
 
 deleteAll:
 DELETE FROM chapter;
-
-updateText:
-UPDATE chapter
-SET text = ?
-WHERE id = ?;
-
-updateOriginalText:
-UPDATE chapter
-SET original_text = ?
-WHERE id = ?;
 
 updateName:
 UPDATE chapter
@@ -77,3 +73,18 @@ WHERE id = ? AND exported = 1;
 
 chapterCount:
 SELECT count(*) FROM chapter;
+
+-- Paragraphs
+selectParagraphsForChapter:
+SELECT ordinal, original_text, marked_text
+FROM paragraph
+WHERE chapter_id = ?
+ORDER BY ordinal ASC;
+
+deleteParagraphsForChapter:
+DELETE FROM paragraph
+WHERE chapter_id = ?;
+
+insertParagraph:
+INSERT INTO paragraph(chapter_id, ordinal, original_text, marked_text)
+VALUES (?, ?, ?, ?);

@@ -39,6 +39,17 @@ object TextParser {
      */
     private val UNICODE_SPACE_SPLIT = Regex("(?:\\R|\\p{Z})+")
 
+    /** Paragraph boundaries for storage, original/markup sync, and validation (blank line between blocks). */
+    private val PARAGRAPH_STORAGE_SPLIT = Regex("\n\\s*\n")
+
+    /** Same split as used in [buildParagraphMapping]; one row per non-blank paragraph. */
+    fun splitParagraphsForStorage(text: String): List<String> =
+        if (text.isBlank()) emptyList()
+        else text.split(PARAGRAPH_STORAGE_SPLIT).map { it.trim() }.filter { it.isNotBlank() }
+
+    fun joinParagraphsForStorage(paragraphs: List<String>): String =
+        if (paragraphs.isEmpty()) "" else paragraphs.joinToString("\n\n")
+
     /**
      * Split plain text into whitespace-separated tokens for comparison and highlight indices.
      * Matches how [stripMarkup] collapses spaces.
@@ -201,7 +212,7 @@ object TextParser {
      * 4. Unmatched segments are collected separately
      */
     fun buildParagraphMapping(originalText: String, segments: List<TextSegment>): ValidationResult {
-        val origParagraphs = originalText.split(Regex("\n\\s*\n")).map { it.trim() }.filter { it.isNotBlank() }
+        val origParagraphs = splitParagraphsForStorage(originalText)
 
         if (origParagraphs.isEmpty()) {
             return ValidationResult(

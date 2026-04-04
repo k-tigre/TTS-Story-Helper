@@ -6,11 +6,18 @@ import app.cash.sqldelight.driver.jdbc.sqlite.JdbcSqliteDriver
 import by.tigre.speechhelper.domain.ChapterInfo
 import by.tigre.speechhelper.domain.LocalTtsSettings
 import by.tigre.speechhelper.domain.SynthesisBackend
+import by.tigre.speechhelper.domain.TextParser
 import by.tigre.speechhelper.domain.VoiceSettings
 import java.io.File
 import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
 import tigre.speechhelper.db.SpeechHelperDatabase
+
+data class StoredChapterParagraph(
+    val ordinal: Int,
+    val originalText: String,
+    val markedText: String,
+)
 
 object SessionStorage {
     private const val META_CURRENT_CHAPTER = "current_chapter_id"
@@ -38,8 +45,11 @@ object SessionStorage {
     private fun createHolder(): Holder {
         val dbFile = File(dir, "speechhelper.db")
         val driver = JdbcSqliteDriver(url = "jdbc:sqlite:${dbFile.absolutePath}")
-        if (!dbFile.exists() || dbFile.length() == 0L) {
+        val isNew = !dbFile.exists() || dbFile.length() == 0L
+        if (isNew) {
             SpeechHelperDatabase.Schema.create(driver).sync()
+        } else {
+            maybeMigrateBlobChapterToParagraphRows(driver)
         }
         applyPragmas(driver)
         val database = SpeechHelperDatabase(driver)
@@ -59,6 +69,34 @@ object SessionStorage {
 
     private inline fun <T> withDb(crossinline block: SpeechHelperDatabase.() -> T): T = synchronized(dbLock) {
         db().block()
+    }
+
+    private fun SpeechHelperDatabase.joinedMarked(chapterId: String): String {
+        val rows = chapterQueries.selectParagraphsForChapter(chapterId).executeAsList()
+        return TextParser.joinParagraphsForStorage(rows.map { it.marked_text })
+    }
+
+    private fun SpeechHelperDatabase.joinedOriginal(chapterId: String): String {
+        val rows = chapterQueries.selectParagraphsForChapter(chapterId).executeAsList()
+        return TextParser.joinParagraphsForStorage(rows.map { it.original_text })
+    }
+
+    private fun SpeechHelperDatabase.paragraphPairs(chapterId: String): List<Pair<String, String>> =
+        chapterQueries.selectParagraphsForChapter(chapterId).executeAsList().map { it.original_text to it.marked_text }
+
+    private fun alignedParagraphPairs(originalJoined: String, markedJoined: String): List<Pair<String, String>> {
+        val o = TextParser.splitParagraphsForStorage(originalJoined)
+        val m = TextParser.splitParagraphsForStorage(markedJoined)
+        if (o.isEmpty() && m.isEmpty()) return emptyList()
+        val n = maxOf(o.size, m.size)
+        return List(n) { i -> o.getOrElse(i) { "" } to m.getOrElse(i) { "" } }
+    }
+
+    private fun SpeechHelperDatabase.replaceChapterParagraphs(chapterId: String, pairs: List<Pair<String, String>>) {
+        chapterQueries.deleteParagraphsForChapter(chapterId).sync()
+        for ((i, p) in pairs.withIndex()) {
+            chapterQueries.insertParagraph(chapterId, i.toLong(), p.first, p.second).sync()
+        }
     }
 
     private fun metaGet(key: String): String? =
@@ -128,6 +166,169 @@ object SessionStorage {
         }
     }
 
+    // ── SQLite v1 (chapter.text / chapter.original_text blobs) → paragraph rows ─────────────
+
+    private data class LegacyChapterBlob(
+        val id: String,
+        val name: String,
+        val markedBlob: String,
+        val originalBlob: String,
+        val audioPath: String?,
+        val markupDone: Long,
+        val voiceDone: Long,
+        val exported: Long,
+    )
+
+    private data class VoiceRow(
+        val speaker: String,
+        val voice: String,
+        val role: String,
+        val speed: Double,
+        val pitch: Double,
+    )
+
+    private fun tableExists(driver: SqlDriver, tableName: String): Boolean {
+        val qr = driver.executeQuery(
+            null,
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=? LIMIT 1",
+            { cursor ->
+                QueryResult.Value(cursor.next().value)
+            },
+            1,
+        ) { bindString(0, tableName) }
+        return (qr as QueryResult.Value<Boolean>).value
+    }
+
+    private fun chapterTableHasTextColumn(driver: SqlDriver): Boolean {
+        val qr = driver.executeQuery(
+            null,
+            "SELECT 1 FROM pragma_table_info('chapter') WHERE name='text' LIMIT 1",
+            { cursor -> QueryResult.Value(cursor.next().value) },
+            0,
+            null,
+        )
+        return (qr as QueryResult.Value<Boolean>).value
+    }
+
+    private fun dropAllSpeechHelperTables(driver: SqlDriver) {
+        driver.execute(null, "DROP TABLE IF EXISTS paragraph", 0, null).sync()
+        driver.execute(null, "DROP TABLE IF EXISTS voice_mapping", 0, null).sync()
+        driver.execute(null, "DROP TABLE IF EXISTS chapter", 0, null).sync()
+        driver.execute(null, "DROP TABLE IF EXISTS app_meta", 0, null).sync()
+    }
+
+    private fun loadLegacyChapterBlobs(driver: SqlDriver): List<LegacyChapterBlob> {
+        val qr = driver.executeQuery(
+            null,
+            """
+            SELECT id, name, text, original_text, audio_path, markup_done, voice_done, exported
+            FROM chapter
+            """.trimIndent(),
+            { cursor ->
+                val list = mutableListOf<LegacyChapterBlob>()
+                while (cursor.next().value) {
+                    list.add(
+                        LegacyChapterBlob(
+                            id = cursor.getString(0)!!,
+                            name = cursor.getString(1)!!,
+                            markedBlob = cursor.getString(2)!!,
+                            originalBlob = cursor.getString(3)!!,
+                            audioPath = cursor.getString(4),
+                            markupDone = cursor.getLong(5)!!,
+                            voiceDone = cursor.getLong(6)!!,
+                            exported = cursor.getLong(7)!!,
+                        ),
+                    )
+                }
+                QueryResult.Value(list)
+            },
+            0,
+            null,
+        )
+        return (qr as QueryResult.Value<List<LegacyChapterBlob>>).value
+    }
+
+    private fun loadAllMeta(driver: SqlDriver): List<Pair<String, String>> {
+        val qr = driver.executeQuery(
+            null,
+            "SELECT key, value FROM app_meta",
+            { cursor ->
+                val list = mutableListOf<Pair<String, String>>()
+                while (cursor.next().value) {
+                    list.add(cursor.getString(0)!! to cursor.getString(1)!!)
+                }
+                QueryResult.Value(list)
+            },
+            0,
+            null,
+        )
+        return (qr as QueryResult.Value<List<Pair<String, String>>>).value
+    }
+
+    private fun loadAllVoices(driver: SqlDriver): List<VoiceRow> {
+        val qr = driver.executeQuery(
+            null,
+            "SELECT speaker_name, voice, role, speed, pitch_shift FROM voice_mapping",
+            { cursor ->
+                val list = mutableListOf<VoiceRow>()
+                while (cursor.next().value) {
+                    list.add(
+                        VoiceRow(
+                            speaker = cursor.getString(0)!!,
+                            voice = cursor.getString(1)!!,
+                            role = cursor.getString(2)!!,
+                            speed = cursor.getDouble(3)!!,
+                            pitch = cursor.getDouble(4)!!,
+                        ),
+                    )
+                }
+                QueryResult.Value(list)
+            },
+            0,
+            null,
+        )
+        return (qr as QueryResult.Value<List<VoiceRow>>).value
+    }
+
+    private fun maybeMigrateBlobChapterToParagraphRows(driver: SqlDriver) {
+        if (!tableExists(driver, "chapter")) {
+            SpeechHelperDatabase.Schema.create(driver).sync()
+            return
+        }
+        if (!chapterTableHasTextColumn(driver)) {
+            if (!tableExists(driver, "paragraph")) {
+                SpeechHelperDatabase.Schema.create(driver).sync()
+            }
+            return
+        }
+        val legacy = loadLegacyChapterBlobs(driver)
+        val meta = loadAllMeta(driver)
+        val voices = loadAllVoices(driver)
+        dropAllSpeechHelperTables(driver)
+        SpeechHelperDatabase.Schema.create(driver).sync()
+        val db = SpeechHelperDatabase(driver)
+        for ((k, v) in meta) {
+            db.appMetaQueries.upsert(k, v).sync()
+        }
+        for (row in voices) {
+            db.voiceMappingQueries.insertRow(row.speaker, row.voice, row.role, row.speed, row.pitch).sync()
+        }
+        for (ch in legacy) {
+            db.chapterQueries.insertChapter(
+                ch.id,
+                ch.name,
+                ch.audioPath,
+                ch.markupDone,
+                ch.voiceDone,
+                ch.exported,
+            ).sync()
+            val pairs = alignedParagraphPairs(ch.originalBlob, ch.markedBlob)
+            for ((i, p) in pairs.withIndex()) {
+                db.chapterQueries.insertParagraph(ch.id, i.toLong(), p.first, p.second).sync()
+            }
+        }
+    }
+
     private fun migrateAncientSessionFiles(database: SpeechHelperDatabase) {
         val sessionText = File(dir, "session_text.txt")
         val sessionMapping = File(dir, "session_mapping.txt")
@@ -135,7 +336,17 @@ object SessionStorage {
 
         val id = newChapterId()
         val text = sessionText.takeIf { it.exists() }?.readText().orEmpty()
-        database.chapterQueries.insertFull(id, "Глава 1", text, "", null, 0L, 0L, 0L).sync()
+        databaseInsertChapterWithParagraphs(
+            database,
+            id,
+            "Глава 1",
+            "",
+            text,
+            null,
+            0L,
+            0L,
+            0L,
+        )
         if (sessionMapping.exists()) {
             parseVoiceLinesToDb(database, sessionMapping.readLines())
             sessionMapping.delete()
@@ -152,6 +363,24 @@ object SessionStorage {
         }
     }
 
+    private fun databaseInsertChapterWithParagraphs(
+        database: SpeechHelperDatabase,
+        id: String,
+        name: String,
+        originalJoined: String,
+        markedJoined: String,
+        audioPath: String?,
+        markupDone: Long,
+        voiceDone: Long,
+        exported: Long,
+    ) {
+        database.chapterQueries.insertChapter(id, name, audioPath, markupDone, voiceDone, exported).sync()
+        val pairs = alignedParagraphPairs(originalJoined, markedJoined)
+        for ((i, p) in pairs.withIndex()) {
+            database.chapterQueries.insertParagraph(id, i.toLong(), p.first, p.second).sync()
+        }
+    }
+
     private fun migrateChapterDirsFromDisk(database: SpeechHelperDatabase) {
         val dirs = chaptersDir.listFiles()?.filter { it.isDirectory }?.sortedBy { it.name }.orEmpty()
         if (dirs.isEmpty()) return
@@ -162,7 +391,7 @@ object SessionStorage {
             val orig = File(d, "original_text.txt").takeIf { it.exists() }?.readText().orEmpty()
             val audio = File(d, "audio_path.txt").takeIf { it.exists() }?.readText()?.trim()?.ifBlank { null }
             val (m, v, e) = readLegacyWorkflow(File(d, "workflow.txt"))
-            database.chapterQueries.insertFull(id, name, text, orig, audio, m, v, e).sync()
+            databaseInsertChapterWithParagraphs(database, id, name, orig, text, audio, m, v, e)
             d.deleteRecursively()
         }
     }
@@ -267,6 +496,12 @@ object SessionStorage {
         }
     }
 
+    fun listChapterParagraphs(chapterId: String): List<StoredChapterParagraph> = withDb {
+        chapterQueries.selectParagraphsForChapter(chapterId).executeAsList().map { r ->
+            StoredChapterParagraph(r.ordinal.toInt(), r.original_text, r.marked_text)
+        }
+    }
+
     fun setChapterMarkupDone(id: String, done: Boolean) {
         withDb {
             chapterQueries.updateMarkupDone(if (done) 1L else 0L, id).sync()
@@ -288,7 +523,7 @@ object SessionStorage {
     fun createChapter(name: String): String {
         val id = newChapterId()
         withDb {
-            chapterQueries.insertFull(id, name, "", "", null, 0L, 0L, 0L).sync()
+            chapterQueries.insertChapter(id, name, null, 0L, 0L, 0L).sync()
         }
         return id
     }
@@ -338,28 +573,48 @@ object SessionStorage {
     }
 
     fun getChapterText(id: String): String =
-        withDb { chapterQueries.selectById(id).executeAsOneOrNull()?.text }.orEmpty()
+        withDb { joinedMarked(id) }
 
     fun setChapterText(id: String, text: String) {
         withDb {
-            val row = chapterQueries.selectById(id).executeAsOneOrNull()
-            if (row != null && row.text != text && row.exported != 0L) {
+            val row = chapterQueries.selectById(id).executeAsOneOrNull() ?: return@withDb
+            val oldMarked = joinedMarked(id)
+            if (oldMarked != text && row.exported != 0L) {
                 chapterQueries.invalidateExportIfExported(id).sync()
             }
-            chapterQueries.updateText(text, id).sync()
+            val newMarked = TextParser.splitParagraphsForStorage(text)
+            val oldPairs = paragraphPairs(id)
+            val o = oldPairs.map { it.first }
+            if (newMarked.isEmpty() && o.isEmpty()) {
+                chapterQueries.deleteParagraphsForChapter(id).sync()
+                return@withDb
+            }
+            val n = maxOf(o.size, newMarked.size)
+            val pairs = List(n) { i -> o.getOrElse(i) { "" } to newMarked.getOrElse(i) { "" } }
+            replaceChapterParagraphs(id, pairs)
         }
     }
 
     fun getOriginalText(id: String): String =
-        withDb { chapterQueries.selectById(id).executeAsOneOrNull()?.original_text }.orEmpty()
+        withDb { joinedOriginal(id) }
 
     fun setOriginalText(id: String, text: String) {
         withDb {
-            val row = chapterQueries.selectById(id).executeAsOneOrNull()
-            if (row != null && row.original_text != text && row.exported != 0L) {
+            val row = chapterQueries.selectById(id).executeAsOneOrNull() ?: return@withDb
+            val oldOrig = joinedOriginal(id)
+            if (oldOrig != text && row.exported != 0L) {
                 chapterQueries.invalidateExportIfExported(id).sync()
             }
-            chapterQueries.updateOriginalText(text, id).sync()
+            val newOrig = TextParser.splitParagraphsForStorage(text)
+            val oldPairs = paragraphPairs(id)
+            val m = oldPairs.map { it.second }
+            if (newOrig.isEmpty() && m.isEmpty()) {
+                chapterQueries.deleteParagraphsForChapter(id).sync()
+                return@withDb
+            }
+            val n = maxOf(newOrig.size, m.size)
+            val pairs = List(n) { i -> newOrig.getOrElse(i) { "" } to m.getOrElse(i) { "" } }
+            replaceChapterParagraphs(id, pairs)
         }
     }
 
