@@ -1,0 +1,40 @@
+CREATE TABLE book (
+    id TEXT NOT NULL PRIMARY KEY,
+    title TEXT NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+
+selectAllOrdered:
+SELECT id, title
+FROM book
+ORDER BY updated_at DESC;
+
+selectTitle:
+SELECT title
+FROM book
+WHERE id = ?
+LIMIT 1;
+
+insertBook:
+INSERT INTO book(id, title, updated_at)
+VALUES (?, ?, ?);
+
+updateTitleAndTime:
+UPDATE book
+SET title = ?, updated_at = ?
+WHERE id = ?;
+
+touchUpdatedAt:
+UPDATE book
+SET updated_at = ?
+WHERE id = ?;
+
+deleteById:
+DELETE FROM book
+WHERE id = ?;
+
+deleteAll:
+DELETE FROM book;
+
+bookCount:
+SELECT count(*) FROM book;

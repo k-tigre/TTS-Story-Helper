@@ -1,18 +1,25 @@
 CREATE TABLE voice_mapping (
-    speaker_name TEXT NOT NULL PRIMARY KEY,
+    book_id TEXT NOT NULL REFERENCES book(id) ON DELETE CASCADE,
+    speaker_name TEXT NOT NULL,
     voice TEXT NOT NULL,
     role TEXT NOT NULL DEFAULT '',
     speed REAL NOT NULL DEFAULT 1.0,
-    pitch_shift REAL NOT NULL DEFAULT 0.0
+    pitch_shift REAL NOT NULL DEFAULT 0.0,
+    PRIMARY KEY (book_id, speaker_name)
 );
 
-selectAll:
+selectAllForBook:
 SELECT speaker_name, voice, role, speed, pitch_shift
-FROM voice_mapping;
+FROM voice_mapping
+WHERE book_id = ?;
 
 insertRow:
-INSERT OR REPLACE INTO voice_mapping(speaker_name, voice, role, speed, pitch_shift)
-VALUES (?, ?, ?, ?, ?);
+INSERT OR REPLACE INTO voice_mapping(book_id, speaker_name, voice, role, speed, pitch_shift)
+VALUES (?, ?, ?, ?, ?, ?);
+
+deleteAllForBook:
+DELETE FROM voice_mapping
+WHERE book_id = ?;
 
 deleteAll:
 DELETE FROM voice_mapping;

@@ -9,8 +9,13 @@ import by.tigre.speechhelper.domain.SynthesisBackend
 import by.tigre.speechhelper.domain.TextParser
 import by.tigre.speechhelper.domain.VoiceSettings
 import java.io.File
+import java.nio.charset.StandardCharsets
 import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
+import java.util.concurrent.Executors
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.asCoroutineDispatcher
+import kotlinx.coroutines.withContext
 import tigre.speechhelper.db.SpeechHelperDatabase
 
 data class StoredChapterParagraph(
@@ -19,9 +24,67 @@ data class StoredChapterParagraph(
     val markedText: String,
 )
 
+data class BookListEntry(
+    val id: String,
+    val title: String,
+)
+
+/** Снимок для первичной гидратации UI вне главного (AWT) потока. */
+data class InitialSessionSnapshot(
+    val chapters: List<ChapterInfo>,
+    val currentChapterId: String,
+    val currentBookTitle: String,
+    val chapterText: String,
+    val originalText: String,
+    val chapterAudioPath: String?,
+    val voiceMapping: Map<String, VoiceSettings>,
+    val synthesisBackend: SynthesisBackend,
+    val localTtsSettings: LocalTtsSettings,
+)
+
 object SessionStorage {
+    private val utf8 = StandardCharsets.UTF_8
+
+    private const val DB_THREAD_NAME = "speechhelper-db"
+
+    /** Один поток обслуживает SQLite (один JDBC-коннект). Читать/писать через [withDb] или `withContext(databaseDispatcher)`. */
+    private val dbExecutor = Executors.newSingleThreadExecutor { r ->
+        Thread(r, DB_THREAD_NAME).apply { isDaemon = true }
+    }
+
+    val databaseDispatcher: CoroutineDispatcher = dbExecutor.asCoroutineDispatcher()
+
+    /**
+     * Открывает БД и выполняет миграции на фоновом потоке SQLite (не на AWT).
+     * Вызывать из [main] до [androidx.compose.ui.window.application].
+     */
+    fun warmUp() {
+        withDb { }
+    }
+
+    suspend fun loadInitialSnapshot(): InitialSessionSnapshot = withContext(databaseDispatcher) {
+        val cid = ensureCurrentChapter()
+        InitialSessionSnapshot(
+            chapters = listChapters(),
+            currentChapterId = cid,
+            currentBookTitle = currentBookTitle(),
+            chapterText = getChapterText(cid),
+            originalText = getOriginalText(cid),
+            chapterAudioPath = getChapterAudioPath(cid),
+            voiceMapping = voiceMapping,
+            synthesisBackend = synthesisBackend,
+            localTtsSettings = localTtsSettings,
+        )
+    }
+
+    suspend fun listBooksSuspend(): List<BookListEntry> = withContext(databaseDispatcher) {
+        listBooks()
+    }
+
     private const val META_CURRENT_CHAPTER = "current_chapter_id"
-    private const val META_CURRENT_BOOK = "current_book_name"
+    private const val META_CURRENT_BOOK_ID = "current_book_id"
+    /** Старый ключ: отображаемое имя; после миграции не используется. */
+    private const val META_CURRENT_BOOK_LEGACY = "current_book_name"
     private const val META_WINDOW_W = "window_width"
     private const val META_WINDOW_H = "window_height"
 
@@ -34,17 +97,30 @@ object SessionStorage {
     private val windowSizeFile = File(dir, "window_size.txt")
     private val booksDir = File(dir, "books").apply { mkdirs() }
 
-    private val dbLock = Any()
-
-    private val holder: Holder by lazy { createHolder() }
-
     private class Holder(
         val database: SpeechHelperDatabase,
     )
 
+    @Volatile
+    private var holder: Holder? = null
+
+    private fun holderOrCreate(): Holder {
+        holder?.let { return it }
+        synchronized(this) {
+            holder?.let { return it }
+            val h = createHolder()
+            holder = h
+            return h
+        }
+    }
+
     private fun createHolder(): Holder {
         val dbFile = File(dir, "speechhelper.db")
-        val driver = JdbcSqliteDriver(url = "jdbc:sqlite:${dbFile.absolutePath}")
+        val pathForUrl = dbFile.absoluteFile.normalize().invariantSeparatorsPath
+        val jdbcUrl = "jdbc:sqlite:$pathForUrl"
+        // Не передавать сюда `encoding` и т.п.: SQLite JDBC разбирает Properties как SQLiteConfig и
+        // значения вроде UTF-8 ломают prepare при открытии соединения.
+        val driver = JdbcSqliteDriver(url = jdbcUrl)
         val isNew = !dbFile.exists() || dbFile.length() == 0L
         if (isNew) {
             SpeechHelperDatabase.Schema.create(driver).sync()
@@ -52,6 +128,7 @@ object SessionStorage {
             maybeMigrateBlobChapterToParagraphRows(driver)
         }
         applyPragmas(driver)
+        migrateBookScopeIfNeeded(driver)
         val database = SpeechHelperDatabase(driver)
         migrateLegacyFilesIfNeeded(database)
         return Holder(database)
@@ -65,11 +142,17 @@ object SessionStorage {
 
     private fun <T> QueryResult<T>.sync(): T = (this as QueryResult.Value<T>).value
 
-    private fun db() = holder.database
+    private fun isDbWorkerThread(): Boolean = Thread.currentThread().name == DB_THREAD_NAME
 
-    private inline fun <T> withDb(crossinline block: SpeechHelperDatabase.() -> T): T = synchronized(dbLock) {
-        db().block()
+    private fun <T> runOnDbThread(body: () -> T): T {
+        if (isDbWorkerThread()) return body()
+        return dbExecutor.submit(body).get()
     }
+
+    private inline fun <T> withDb(crossinline block: SpeechHelperDatabase.() -> T): T =
+        runOnDbThread {
+            holderOrCreate().database.block()
+        }
 
     private fun SpeechHelperDatabase.joinedMarked(chapterId: String): String {
         val rows = chapterQueries.selectParagraphsForChapter(chapterId).executeAsList()
@@ -132,12 +215,15 @@ object SessionStorage {
     private fun newChapterId(): String =
         LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss_SSS"))
 
+    private fun newBookId(): String =
+        LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss_SSS")) + "_b"
+
     private fun readLegacyWorkflow(f: File): Triple<Long, Long, Long> {
         if (!f.exists()) return Triple(0L, 0L, 0L)
         var markupDone = 0L
         var voiceDone = 0L
         var exported = 0L
-        for (line in f.readLines()) {
+        for (line in f.readLines(utf8)) {
             val idx = line.indexOf('=')
             if (idx <= 0) continue
             val key = line.take(idx).trim()
@@ -152,7 +238,7 @@ object SessionStorage {
         return Triple(markupDone, voiceDone, exported)
     }
 
-    private fun parseVoiceLinesToDb(database: SpeechHelperDatabase, lines: Iterable<String>) {
+    private fun parseVoiceLinesToDb(database: SpeechHelperDatabase, bookId: String, lines: Iterable<String>) {
         for (line in lines) {
             val parts = line.split("=", limit = 2)
             if (parts.size != 2) continue
@@ -162,7 +248,7 @@ object SessionStorage {
             val role = fields.getOrElse(1) { "" }
             val speed = fields.getOrElse(2) { "1.0" }.toDoubleOrNull() ?: 1.0
             val pitchShift = fields.getOrElse(3) { "0.0" }.toDoubleOrNull() ?: 0.0
-            database.voiceMappingQueries.insertRow(name, voice, role, speed, pitchShift).sync()
+            database.voiceMappingQueries.insertRow(bookId, name, voice, role, speed, pitchShift).sync()
         }
     }
 
@@ -187,6 +273,12 @@ object SessionStorage {
         val pitch: Double,
     )
 
+    private data class SavedBookBlobRow(
+        val name: String,
+        val content: String,
+        val updatedAt: Long,
+    )
+
     private fun tableExists(driver: SqlDriver, tableName: String): Boolean {
         val qr = driver.executeQuery(
             null,
@@ -197,6 +289,58 @@ object SessionStorage {
             1,
         ) { bindString(0, tableName) }
         return (qr as QueryResult.Value<Boolean>).value
+    }
+
+    private fun columnExists(driver: SqlDriver, table: String, column: String): Boolean {
+        val qr = driver.executeQuery(
+            null,
+            "SELECT 1 FROM pragma_table_info(?) WHERE name = ? LIMIT 1",
+            { cursor -> QueryResult.Value(cursor.next().value) },
+            2,
+        ) {
+            bindString(0, table)
+            bindString(1, column)
+        }
+        return (qr as QueryResult.Value<Boolean>).value
+    }
+
+    private fun firstBookIdFromDriver(driver: SqlDriver): String? {
+        if (!tableExists(driver, "book")) return null
+        val qr = driver.executeQuery(
+            null,
+            "SELECT id FROM book LIMIT 1",
+            { cursor ->
+                val ok = cursor.next().value
+                QueryResult.Value(if (ok) cursor.getString(0) else null)
+            },
+            0,
+            null,
+        )
+        return (qr as QueryResult.Value<String?>).value
+    }
+
+    private fun loadSavedBookBlobRows(driver: SqlDriver): List<SavedBookBlobRow> {
+        if (!tableExists(driver, "saved_book")) return emptyList()
+        val qr = driver.executeQuery(
+            null,
+            "SELECT name, content, updated_at FROM saved_book",
+            { cursor ->
+                val list = mutableListOf<SavedBookBlobRow>()
+                while (cursor.next().value) {
+                    list.add(
+                        SavedBookBlobRow(
+                            name = cursor.getString(0)!!,
+                            content = cursor.getString(1)!!,
+                            updatedAt = cursor.getLong(2)!!,
+                        ),
+                    )
+                }
+                QueryResult.Value(list)
+            },
+            0,
+            null,
+        )
+        return (qr as QueryResult.Value<List<SavedBookBlobRow>>).value
     }
 
     private fun chapterTableHasTextColumn(driver: SqlDriver): Boolean {
@@ -212,8 +356,10 @@ object SessionStorage {
 
     private fun dropAllSpeechHelperTables(driver: SqlDriver) {
         driver.execute(null, "DROP TABLE IF EXISTS paragraph", 0, null).sync()
+        driver.execute(null, "DROP TABLE IF EXISTS saved_book", 0, null).sync()
         driver.execute(null, "DROP TABLE IF EXISTS voice_mapping", 0, null).sync()
         driver.execute(null, "DROP TABLE IF EXISTS chapter", 0, null).sync()
+        driver.execute(null, "DROP TABLE IF EXISTS book", 0, null).sync()
         driver.execute(null, "DROP TABLE IF EXISTS app_meta", 0, null).sync()
     }
 
@@ -290,7 +436,7 @@ object SessionStorage {
         return (qr as QueryResult.Value<List<VoiceRow>>).value
     }
 
-    private fun maybeMigrateBlobChapterToParagraphRows(driver: SqlDriver) {
+    private fun  maybeMigrateBlobChapterToParagraphRows(driver: SqlDriver) {
         if (!tableExists(driver, "chapter")) {
             SpeechHelperDatabase.Schema.create(driver).sync()
             return
@@ -307,15 +453,19 @@ object SessionStorage {
         dropAllSpeechHelperTables(driver)
         SpeechHelperDatabase.Schema.create(driver).sync()
         val db = SpeechHelperDatabase(driver)
+        val defaultBookId = newBookId()
+        db.bookQueries.insertBook(defaultBookId, "Без названия", System.currentTimeMillis()).sync()
         for ((k, v) in meta) {
+            if (k == META_CURRENT_BOOK_LEGACY) continue
             db.appMetaQueries.upsert(k, v).sync()
         }
         for (row in voices) {
-            db.voiceMappingQueries.insertRow(row.speaker, row.voice, row.role, row.speed, row.pitch).sync()
+            db.voiceMappingQueries.insertRow(defaultBookId, row.speaker, row.voice, row.role, row.speed, row.pitch).sync()
         }
         for (ch in legacy) {
             db.chapterQueries.insertChapter(
                 ch.id,
+                defaultBookId,
                 ch.name,
                 ch.audioPath,
                 ch.markupDone,
@@ -327,17 +477,167 @@ object SessionStorage {
                 db.chapterQueries.insertParagraph(ch.id, i.toLong(), p.first, p.second).sync()
             }
         }
+        val oldName = meta.firstOrNull { it.first == META_CURRENT_BOOK_LEGACY }?.second?.trim().orEmpty()
+        if (oldName.isNotBlank()) {
+            db.bookQueries.updateTitleAndTime(oldName, System.currentTimeMillis(), defaultBookId).sync()
+        }
+        db.appMetaQueries.upsert(META_CURRENT_BOOK_ID, defaultBookId).sync()
     }
 
-    private fun migrateAncientSessionFiles(database: SpeechHelperDatabase) {
+    private fun migrateBookScopeIfNeeded(driver: SqlDriver) {
+        if (!tableExists(driver, "book")) {
+            driver.execute(
+                null,
+                """
+                CREATE TABLE book (
+                    id TEXT NOT NULL PRIMARY KEY,
+                    title TEXT NOT NULL,
+                    updated_at INTEGER NOT NULL
+                )
+                """.trimIndent(),
+                0,
+                null,
+            ).sync()
+        }
+
+        if (!columnExists(driver, "chapter", "book_id")) {
+            val defaultBookId = newBookId()
+            val now = System.currentTimeMillis()
+            driver.execute(
+                null,
+                "INSERT INTO book(id, title, updated_at) VALUES(?,?,?)",
+                3,
+            ) {
+                bindString(0, defaultBookId)
+                bindString(1, "Без названия")
+                bindLong(2, now)
+            }.sync()
+            driver.execute(null, "ALTER TABLE chapter ADD COLUMN book_id TEXT", 0, null).sync()
+            driver.execute(
+                null,
+                "UPDATE chapter SET book_id = ? WHERE book_id IS NULL",
+                1,
+            ) { bindString(0, defaultBookId) }.sync()
+        }
+
+        if (tableExists(driver, "voice_mapping") && !columnExists(driver, "voice_mapping", "book_id")) {
+            val bookId = firstBookIdFromDriver(driver) ?: return
+            driver.execute(
+                null,
+                """
+                CREATE TABLE voice_mapping_new (
+                    book_id TEXT NOT NULL,
+                    speaker_name TEXT NOT NULL,
+                    voice TEXT NOT NULL,
+                    role TEXT NOT NULL DEFAULT '',
+                    speed REAL NOT NULL DEFAULT 1.0,
+                    pitch_shift REAL NOT NULL DEFAULT 0.0,
+                    PRIMARY KEY (book_id, speaker_name)
+                )
+                """.trimIndent(),
+                0,
+                null,
+            ).sync()
+            driver.execute(
+                null,
+                """
+                INSERT INTO voice_mapping_new(book_id, speaker_name, voice, role, speed, pitch_shift)
+                SELECT ?, speaker_name, voice, role, speed, pitch_shift FROM voice_mapping
+                """.trimIndent(),
+                1,
+            ) { bindString(0, bookId) }.sync()
+            driver.execute(null, "DROP TABLE voice_mapping", 0, null).sync()
+            driver.execute(null, "ALTER TABLE voice_mapping_new RENAME TO voice_mapping", 0, null).sync()
+        }
+
+        if (tableExists(driver, "saved_book")) {
+            val db = SpeechHelperDatabase(driver)
+            for (row in loadSavedBookBlobRows(driver)) {
+                if (!row.content.startsWith("##BOOK_FORMAT_V1##")) continue
+                val bookId = newBookId()
+                db.bookQueries.insertBook(bookId, row.name, row.updatedAt).sync()
+                applyLoadedBookFormatLinesForBook(
+                    db,
+                    bookId,
+                    row.content.lines(),
+                    setCurrentChapterMeta = false,
+                )
+            }
+            driver.execute(null, "DROP TABLE IF EXISTS saved_book", 0, null).sync()
+        }
+
+        val db = SpeechHelperDatabase(driver)
+        migrateCurrentBookMetaKey(db)
+        ensureMinimumBooks(db)
+    }
+
+    private fun migrateCurrentBookMetaKey(database: SpeechHelperDatabase) {
+        if (database.appMetaQueries.getValue(META_CURRENT_BOOK_ID).executeAsOneOrNull() != null) {
+            database.appMetaQueries.deleteKey(META_CURRENT_BOOK_LEGACY).sync()
+            return
+        }
+        val oldTitle = database.appMetaQueries.getValue(META_CURRENT_BOOK_LEGACY).executeAsOneOrNull()?.trim().orEmpty()
+        val books = database.bookQueries.selectAllOrdered().executeAsList()
+        val resolved = when {
+            oldTitle.isNotBlank() -> books.firstOrNull { it.title == oldTitle }?.id ?: books.firstOrNull()?.id
+            else -> books.firstOrNull()?.id
+        }
+        if (resolved != null) {
+            database.appMetaQueries.upsert(META_CURRENT_BOOK_ID, resolved).sync()
+        }
+        database.appMetaQueries.deleteKey(META_CURRENT_BOOK_LEGACY).sync()
+    }
+
+    private fun ensureMinimumBooks(database: SpeechHelperDatabase) {
+        if (database.bookQueries.bookCount().executeAsOne() > 0L) return
+        val bookId = newBookId()
+        val chapterId = newChapterId()
+        val now = System.currentTimeMillis()
+        database.bookQueries.insertBook(bookId, "Без названия", now).sync()
+        database.chapterQueries.insertChapter(chapterId, bookId, "Глава 1", null, 0L, 0L, 0L).sync()
+        database.appMetaQueries.upsert(META_CURRENT_BOOK_ID, bookId).sync()
+        database.appMetaQueries.upsert(META_CURRENT_CHAPTER, chapterId).sync()
+    }
+
+    private fun ensureDefaultBookRow(database: SpeechHelperDatabase): String {
+        val first = database.bookQueries.selectAllOrdered().executeAsList().firstOrNull()
+        if (first != null) return first.id
+        val bookId = newBookId()
+        database.bookQueries.insertBook(bookId, "Без названия", System.currentTimeMillis()).sync()
+        return bookId
+    }
+
+    private fun finalizeBookContext(database: SpeechHelperDatabase) {
+        val books = database.bookQueries.selectAllOrdered().executeAsList()
+        if (books.isEmpty()) {
+            ensureMinimumBooks(database)
+            return
+        }
+        var bookId = database.appMetaQueries.getValue(META_CURRENT_BOOK_ID).executeAsOneOrNull()
+        if (bookId == null || books.none { it.id == bookId }) {
+            bookId = books.first().id
+            database.appMetaQueries.upsert(META_CURRENT_BOOK_ID, bookId).sync()
+        }
+        val cid = database.appMetaQueries.getValue(META_CURRENT_CHAPTER).executeAsOneOrNull()
+        val row = cid?.let { database.chapterQueries.selectById(it).executeAsOneOrNull() }
+        if (row == null || row.book_id != bookId) {
+            val firstCh = database.chapterQueries.firstIdForBook(bookId).executeAsOneOrNull()
+            if (firstCh != null) {
+                database.appMetaQueries.upsert(META_CURRENT_CHAPTER, firstCh).sync()
+            }
+        }
+    }
+
+    private fun migrateAncientSessionFiles(database: SpeechHelperDatabase, bookId: String) {
         val sessionText = File(dir, "session_text.txt")
         val sessionMapping = File(dir, "session_mapping.txt")
         if (!sessionText.exists() && !sessionMapping.exists()) return
 
         val id = newChapterId()
-        val text = sessionText.takeIf { it.exists() }?.readText().orEmpty()
+        val text = sessionText.takeIf { it.exists() }?.readText(utf8).orEmpty()
         databaseInsertChapterWithParagraphs(
             database,
+            bookId,
             id,
             "Глава 1",
             "",
@@ -348,7 +648,7 @@ object SessionStorage {
             0L,
         )
         if (sessionMapping.exists()) {
-            parseVoiceLinesToDb(database, sessionMapping.readLines())
+            parseVoiceLinesToDb(database, bookId, sessionMapping.readLines(utf8))
             sessionMapping.delete()
         }
         if (sessionText.exists()) sessionText.delete()
@@ -365,6 +665,7 @@ object SessionStorage {
 
     private fun databaseInsertChapterWithParagraphs(
         database: SpeechHelperDatabase,
+        bookId: String,
         id: String,
         name: String,
         originalJoined: String,
@@ -374,31 +675,31 @@ object SessionStorage {
         voiceDone: Long,
         exported: Long,
     ) {
-        database.chapterQueries.insertChapter(id, name, audioPath, markupDone, voiceDone, exported).sync()
+        database.chapterQueries.insertChapter(id, bookId, name, audioPath, markupDone, voiceDone, exported).sync()
         val pairs = alignedParagraphPairs(originalJoined, markedJoined)
         for ((i, p) in pairs.withIndex()) {
             database.chapterQueries.insertParagraph(id, i.toLong(), p.first, p.second).sync()
         }
     }
 
-    private fun migrateChapterDirsFromDisk(database: SpeechHelperDatabase) {
+    private fun migrateChapterDirsFromDisk(database: SpeechHelperDatabase, bookId: String) {
         val dirs = chaptersDir.listFiles()?.filter { it.isDirectory }?.sortedBy { it.name }.orEmpty()
         if (dirs.isEmpty()) return
         for (d in dirs) {
             val id = d.name
-            val name = File(d, "meta.txt").takeIf { it.exists() }?.readText()?.trim()?.ifBlank { null } ?: id
-            val text = File(d, "text.txt").takeIf { it.exists() }?.readText().orEmpty()
-            val orig = File(d, "original_text.txt").takeIf { it.exists() }?.readText().orEmpty()
-            val audio = File(d, "audio_path.txt").takeIf { it.exists() }?.readText()?.trim()?.ifBlank { null }
+            val name = File(d, "meta.txt").takeIf { it.exists() }?.readText(utf8)?.trim()?.ifBlank { null } ?: id
+            val text = File(d, "text.txt").takeIf { it.exists() }?.readText(utf8).orEmpty()
+            val orig = File(d, "original_text.txt").takeIf { it.exists() }?.readText(utf8).orEmpty()
+            val audio = File(d, "audio_path.txt").takeIf { it.exists() }?.readText(utf8)?.trim()?.ifBlank { null }
             val (m, v, e) = readLegacyWorkflow(File(d, "workflow.txt"))
-            databaseInsertChapterWithParagraphs(database, id, name, orig, text, audio, m, v, e)
+            databaseInsertChapterWithParagraphs(database, bookId, id, name, orig, text, audio, m, v, e)
             d.deleteRecursively()
         }
     }
 
     private fun importSynthPrefsFileIfExists(database: SpeechHelperDatabase) {
         if (!synthesisPrefsFile.exists()) return
-        for (line in synthesisPrefsFile.readLines()) {
+        for (line in synthesisPrefsFile.readLines(utf8)) {
             val i = line.indexOf('=')
             if (i <= 0) continue
             val k = line.take(i).trim()
@@ -410,38 +711,41 @@ object SessionStorage {
 
     private fun migrateLegacyFilesIfNeeded(database: SpeechHelperDatabase) {
         val dirs = chaptersDir.listFiles()?.filter { it.isDirectory }.orEmpty()
+        val defaultBookId = ensureDefaultBookRow(database)
         val emptyDb = database.chapterQueries.chapterCount().executeAsOne() == 0L
         if (emptyDb) {
             if (dirs.isNotEmpty()) {
-                migrateChapterDirsFromDisk(database)
+                migrateChapterDirsFromDisk(database, defaultBookId)
             } else {
-                migrateAncientSessionFiles(database)
+                migrateAncientSessionFiles(database, defaultBookId)
             }
         } else if (dirs.isNotEmpty()) {
             dirs.forEach { it.deleteRecursively() }
         }
 
         if (mappingFile.exists()) {
-            parseVoiceLinesToDb(database, mappingFile.readLines())
+            parseVoiceLinesToDb(database, defaultBookId, mappingFile.readLines(utf8))
             mappingFile.delete()
         }
 
         currentChapterFile.takeIf { it.exists() }?.let { f ->
-            val v = f.readText().trim()
+            val v = f.readText(utf8).trim()
             if (v.isNotBlank()) database.appMetaQueries.upsert(META_CURRENT_CHAPTER, v).sync()
             f.delete()
         }
 
         currentBookFile.takeIf { it.exists() }?.let { f ->
-            val v = f.readText().trim()
-            if (v.isNotBlank()) database.appMetaQueries.upsert(META_CURRENT_BOOK, v).sync()
+            val v = f.readText(utf8).trim()
+            if (v.isNotBlank()) {
+                database.bookQueries.updateTitleAndTime(v, System.currentTimeMillis(), defaultBookId).sync()
+            }
             f.delete()
         }
 
         importSynthPrefsFileIfExists(database)
 
         windowSizeFile.takeIf { it.exists() }?.let { f ->
-            val lines = f.readLines()
+            val lines = f.readLines(utf8)
             lines.getOrNull(0)?.toIntOrNull()?.let { w ->
                 database.appMetaQueries.upsert(META_WINDOW_W, w.toString()).sync()
             }
@@ -450,283 +754,39 @@ object SessionStorage {
             }
             f.delete()
         }
+
+        migrateLegacyBookTxtFilesFromDisk(database)
+        finalizeBookContext(database)
     }
 
-    var synthesisBackend: SynthesisBackend
-        get() = when (readSynthPrefs()["backend"]?.lowercase()) {
-            "local" -> SynthesisBackend.Local
-            else -> SynthesisBackend.Cloud
-        }
-        set(value) {
-            val m = readSynthPrefs()
-            m["backend"] = when (value) {
-                SynthesisBackend.Cloud -> "cloud"
-                SynthesisBackend.Local -> "local"
+    private fun migrateLegacyBookTxtFilesFromDisk(database: SpeechHelperDatabase) {
+        val files = booksDir.listFiles()?.filter { it.isFile && it.extension.equals("txt", ignoreCase = true) }.orEmpty()
+        for (f in files) {
+            val content = try {
+                f.readText(utf8)
+            } catch (_: Exception) {
+                continue
             }
-            writeSynthPrefs(m)
-        }
-
-    var localTtsSettings: LocalTtsSettings
-        get() {
-            val m = readSynthPrefs()
-            val def = LocalTtsSettings()
-            return LocalTtsSettings(
-                baseUrl = m["local_base_url"]?.ifBlank { null } ?: def.baseUrl,
-                modelId = m["local_model"]?.ifBlank { null } ?: def.modelId,
-                sampleRate = m["local_sample_rate"]?.toIntOrNull() ?: def.sampleRate,
+            if (!content.startsWith("##BOOK_FORMAT_V1##")) continue
+            val bookId = newBookId()
+            database.bookQueries.insertBook(bookId, f.nameWithoutExtension, f.lastModified()).sync()
+            applyLoadedBookFormatLinesForBook(
+                database,
+                bookId,
+                content.lines(),
+                setCurrentChapterMeta = false,
             )
-        }
-        set(value) {
-            val m = readSynthPrefs()
-            m["local_base_url"] = value.baseUrl
-            m["local_model"] = value.modelId
-            m["local_sample_rate"] = value.sampleRate.toString()
-            writeSynthPrefs(m)
-        }
-
-    fun listChapters(): List<ChapterInfo> = withDb {
-        chapterQueries.selectAllForList().executeAsList().map { row ->
-            ChapterInfo(
-                id = row.id,
-                name = row.name,
-                markupDone = row.markup_done != 0L,
-                voiceDone = row.voice_done != 0L,
-                exported = row.exported != 0L,
-            )
+            f.delete()
         }
     }
 
-    fun listChapterParagraphs(chapterId: String): List<StoredChapterParagraph> = withDb {
-        chapterQueries.selectParagraphsForChapter(chapterId).executeAsList().map { r ->
-            StoredChapterParagraph(r.ordinal.toInt(), r.original_text, r.marked_text)
-        }
-    }
+    private data class ParsedBookV1(
+        val voices: Map<String, VoiceSettings>,
+        val chapters: List<Triple<String, String, String>>,
+    )
 
-    fun setChapterMarkupDone(id: String, done: Boolean) {
-        withDb {
-            chapterQueries.updateMarkupDone(if (done) 1L else 0L, id).sync()
-        }
-    }
-
-    fun setChapterVoiceDone(id: String, done: Boolean) {
-        withDb {
-            chapterQueries.updateVoiceDone(if (done) 1L else 0L, id).sync()
-        }
-    }
-
-    fun setChapterExported(id: String, exported: Boolean) {
-        withDb {
-            chapterQueries.updateExported(if (exported) 1L else 0L, id).sync()
-        }
-    }
-
-    fun createChapter(name: String): String {
-        val id = newChapterId()
-        withDb {
-            chapterQueries.insertChapter(id, name, null, 0L, 0L, 0L).sync()
-        }
-        return id
-    }
-
-    fun deleteChapter(id: String) {
-        withDb {
-            chapterQueries.deleteById(id).sync()
-        }
-        clearChapterCache(id)
-        if (currentChapterId == id) {
-            val remaining = listChapters()
-            currentChapterId = remaining.firstOrNull()?.id
-        }
-    }
-
-    fun renameChapter(id: String, name: String) {
-        withDb {
-            chapterQueries.updateName(name, id).sync()
-        }
-    }
-
-    var currentChapterId: String?
-        get() = metaGet(META_CURRENT_CHAPTER)?.ifBlank { null }
-        set(value) {
-            if (value != null) metaSet(META_CURRENT_CHAPTER, value) else metaDelete(META_CURRENT_CHAPTER)
-        }
-
-    var currentBookName: String
-        get() = metaGet(META_CURRENT_BOOK)?.trim().orEmpty()
-        set(bookValue) {
-            if (bookValue.isNotBlank()) metaSet(META_CURRENT_BOOK, bookValue) else metaDelete(META_CURRENT_BOOK)
-        }
-
-    fun ensureCurrentChapter(): String {
-        val cur = currentChapterId
-        if (cur != null && withDb { chapterQueries.selectById(cur).executeAsOneOrNull() } != null) {
-            return cur
-        }
-        val chapters = listChapters()
-        val id = if (chapters.isNotEmpty()) {
-            chapters.first().id
-        } else {
-            createChapter("Глава 1")
-        }
-        currentChapterId = id
-        return id
-    }
-
-    fun getChapterText(id: String): String =
-        withDb { joinedMarked(id) }
-
-    fun setChapterText(id: String, text: String) {
-        withDb {
-            val row = chapterQueries.selectById(id).executeAsOneOrNull() ?: return@withDb
-            val oldMarked = joinedMarked(id)
-            if (oldMarked != text && row.exported != 0L) {
-                chapterQueries.invalidateExportIfExported(id).sync()
-            }
-            val newMarked = TextParser.splitParagraphsForStorage(text)
-            val oldPairs = paragraphPairs(id)
-            val o = oldPairs.map { it.first }
-            if (newMarked.isEmpty() && o.isEmpty()) {
-                chapterQueries.deleteParagraphsForChapter(id).sync()
-                return@withDb
-            }
-            val n = maxOf(o.size, newMarked.size)
-            val pairs = List(n) { i -> o.getOrElse(i) { "" } to newMarked.getOrElse(i) { "" } }
-            replaceChapterParagraphs(id, pairs)
-        }
-    }
-
-    fun getOriginalText(id: String): String =
-        withDb { joinedOriginal(id) }
-
-    fun setOriginalText(id: String, text: String) {
-        withDb {
-            val row = chapterQueries.selectById(id).executeAsOneOrNull() ?: return@withDb
-            val oldOrig = joinedOriginal(id)
-            if (oldOrig != text && row.exported != 0L) {
-                chapterQueries.invalidateExportIfExported(id).sync()
-            }
-            val newOrig = TextParser.splitParagraphsForStorage(text)
-            val oldPairs = paragraphPairs(id)
-            val m = oldPairs.map { it.second }
-            if (newOrig.isEmpty() && m.isEmpty()) {
-                chapterQueries.deleteParagraphsForChapter(id).sync()
-                return@withDb
-            }
-            val n = maxOf(newOrig.size, m.size)
-            val pairs = List(n) { i -> newOrig.getOrElse(i) { "" } to m.getOrElse(i) { "" } }
-            replaceChapterParagraphs(id, pairs)
-        }
-    }
-
-    var voiceMapping: Map<String, VoiceSettings>
-        get() = withDb {
-            voiceMappingQueries.selectAll().executeAsList().associate { row ->
-                row.speaker_name to VoiceSettings(row.voice, row.role, row.speed, row.pitch_shift)
-            }
-        }
-        set(value) {
-            withDb {
-                voiceMappingQueries.deleteAll().sync()
-                for ((name, s) in value) {
-                    voiceMappingQueries.insertRow(name, s.voice, s.role, s.speed, s.pitchShift).sync()
-                }
-            }
-        }
-
-    fun getChapterAudioPath(id: String): String? =
-        withDb {
-            chapterQueries.selectById(id).executeAsOneOrNull()?.audio_path?.trim()?.ifBlank { null }
-        }
-
-    fun setChapterAudioPath(id: String, path: String) {
-        withDb {
-            val row = chapterQueries.selectById(id).executeAsOneOrNull()
-            val newPath = path.trim()
-            val old = row?.audio_path?.trim().orEmpty()
-            if (old != newPath && row?.exported != 0L) {
-                chapterQueries.invalidateExportIfExported(id).sync()
-            }
-            chapterQueries.updateAudioPath(newPath.ifBlank { null }, id).sync()
-        }
-    }
-
-    fun clearChapterAudioPath(id: String) {
-        withDb {
-            val row = chapterQueries.selectById(id).executeAsOneOrNull()
-            if (row?.audio_path != null && row.exported != 0L) {
-                chapterQueries.invalidateExportIfExported(id).sync()
-            }
-            chapterQueries.clearAudioPath(id).sync()
-        }
-    }
-
-    fun getChapterCacheDir(id: String): File =
-        File(System.getProperty("user.home"), "SpeechHelper/cache/$id").apply { mkdirs() }
-
-    fun clearChapterCache(id: String) {
-        val cacheDir = File(System.getProperty("user.home"), "SpeechHelper/cache/$id")
-        if (cacheDir.exists()) {
-            cacheDir.deleteRecursively()
-        }
-    }
-
-    var windowWidth: Int
-        get() = metaGet(META_WINDOW_W)?.toIntOrNull() ?: 800
-        set(value) {
-            metaSet(META_WINDOW_W, value.toString())
-        }
-
-    var windowHeight: Int
-        get() = metaGet(META_WINDOW_H)?.toIntOrNull() ?: 600
-        set(value) {
-            metaSet(META_WINDOW_H, value.toString())
-        }
-
-    fun saveWindowSize(width: Int, height: Int) {
-        metaSet(META_WINDOW_W, width.toString())
-        metaSet(META_WINDOW_H, height.toString())
-    }
-
-    fun listBooks(): List<String> =
-        booksDir.listFiles()
-            ?.filter { it.isFile && it.extension == "txt" }
-            ?.sortedByDescending { it.lastModified() }
-            ?.map { it.nameWithoutExtension }
-            .orEmpty()
-
-    fun saveBook(bookName: String) {
-        val sb = StringBuilder()
-        sb.appendLine("##BOOK_FORMAT_V1##")
-        sb.appendLine("##VOICE_MAPPING##")
-        val mapping = voiceMapping
-        for ((name, s) in mapping) {
-            sb.appendLine("$name=${s.voice}|${s.role}|${s.speed}|${s.pitchShift}")
-        }
-        val chapters = listChapters()
-        for (chapter in chapters) {
-            sb.appendLine("##CHAPTER##")
-            sb.appendLine(chapter.name)
-            sb.appendLine("##TEXT##")
-            sb.appendLine(getChapterText(chapter.id))
-            val origText = getOriginalText(chapter.id)
-            if (origText.isNotBlank()) {
-                sb.appendLine("##ORIGINAL_TEXT##")
-                sb.appendLine(origText)
-            }
-        }
-        sb.appendLine("##END##")
-
-        val safeFileName = bookName.replace(Regex("[^\\w\\s\\-()\\[\\]а-яА-ЯёЁ]"), "_").trim()
-        File(booksDir, "$safeFileName.txt").writeText(sb.toString())
-    }
-
-    fun loadBook(bookName: String): Boolean {
-        val file = File(booksDir, "$bookName.txt")
-        if (!file.exists()) return false
-
-        val lines = file.readLines()
-        if (lines.firstOrNull() != "##BOOK_FORMAT_V1##") return false
-
+    private fun parseBookFormatV1Lines(lines: List<String>): ParsedBookV1? {
+        if (lines.firstOrNull()?.trim() != "##BOOK_FORMAT_V1##") return null
         val newMapping = mutableMapOf<String, VoiceSettings>()
         data class ChapterData(val name: String, val text: String, val originalText: String)
         val newChapters = mutableListOf<ChapterData>()
@@ -775,40 +835,415 @@ object SessionStorage {
             newChapters.add(ChapterData(chapterName, chapterText, chapterOriginalText))
         }
 
-        if (newChapters.isEmpty()) return false
+        if (newChapters.isEmpty()) return null
+        return ParsedBookV1(
+            newMapping,
+            newChapters.map { Triple(it.name, it.text, it.originalText) },
+        )
+    }
 
-        clearAllData()
+    private fun applyLoadedBookFormatLinesForBook(
+        database: SpeechHelperDatabase,
+        bookId: String,
+        lines: List<String>,
+        setCurrentChapterMeta: Boolean,
+    ): Boolean {
+        val parsed = parseBookFormatV1Lines(lines) ?: return false
+
+        database.chapterQueries.deleteChaptersForBook(bookId).sync()
+        database.voiceMappingQueries.deleteAllForBook(bookId).sync()
 
         var firstId: String? = null
-        for (chapter in newChapters) {
-            val id = createChapter(chapter.name)
-            setChapterText(id, chapter.text)
-            if (chapter.originalText.isNotBlank()) {
-                setOriginalText(id, chapter.originalText)
+        for ((chapterName, chapterText, chapterOriginalText) in parsed.chapters) {
+            val id = newChapterId()
+            database.chapterQueries.insertChapter(id, bookId, chapterName, null, 0L, 0L, 0L).sync()
+            val pairs = alignedParagraphPairs(chapterOriginalText, chapterText)
+            for ((ord, p) in pairs.withIndex()) {
+                database.chapterQueries.insertParagraph(id, ord.toLong(), p.first, p.second).sync()
             }
             if (firstId == null) firstId = id
         }
 
-        voiceMapping = newMapping
-
-        if (firstId != null) {
-            currentChapterId = firstId
+        for ((name, s) in parsed.voices) {
+            database.voiceMappingQueries.insertRow(bookId, name, s.voice, s.role, s.speed, s.pitchShift).sync()
         }
 
+        if (setCurrentChapterMeta && firstId != null) {
+            database.appMetaQueries.upsert(META_CURRENT_CHAPTER, firstId).sync()
+        }
         return true
     }
 
-    fun deleteBook(bookName: String) {
-        File(booksDir, "$bookName.txt").delete()
+    fun requireCurrentBookId(): String = withDb {
+        appMetaQueries.getValue(META_CURRENT_BOOK_ID).executeAsOneOrNull()?.takeIf { bid ->
+            bookQueries.selectTitle(bid).executeAsOneOrNull() != null
+        }?.let { return@withDb it }
+
+        val firstRow = bookQueries.selectAllOrdered().executeAsList().firstOrNull()
+        if (firstRow != null) {
+            appMetaQueries.upsert(META_CURRENT_BOOK_ID, firstRow.id).sync()
+            return@withDb firstRow.id
+        }
+        val bid = newBookId()
+        bookQueries.insertBook(bid, "Без названия", System.currentTimeMillis()).sync()
+        appMetaQueries.upsert(META_CURRENT_BOOK_ID, bid).sync()
+        bid
+    }
+
+    var currentBookId: String?
+        get() = metaGet(META_CURRENT_BOOK_ID)?.ifBlank { null }
+        set(value) {
+            if (value != null) metaSet(META_CURRENT_BOOK_ID, value) else metaDelete(META_CURRENT_BOOK_ID)
+        }
+
+    /** Заголовок текущей книги (из строки book, не из метаданных-флага). */
+    fun currentBookTitle(): String = withDb {
+        val id = requireCurrentBookId()
+        bookQueries.selectTitle(id).executeAsOneOrNull().orEmpty()
+    }
+
+    fun setCurrentBookTitle(title: String) {
+        val id = requireCurrentBookId()
+        val t = title.trim()
+        if (t.isEmpty()) return
+        withDb {
+            bookQueries.updateTitleAndTime(t, System.currentTimeMillis(), id).sync()
+        }
+    }
+
+    fun switchToBook(bookId: String): Boolean = withDb {
+        if (bookQueries.selectTitle(bookId).executeAsOneOrNull() == null) return@withDb false
+        appMetaQueries.upsert(META_CURRENT_BOOK_ID, bookId).sync()
+        val first = chapterQueries.firstIdForBook(bookId).executeAsOneOrNull()
+        if (first != null) {
+            appMetaQueries.upsert(META_CURRENT_CHAPTER, first).sync()
+        } else {
+            val cid = newChapterId()
+            chapterQueries.insertChapter(cid, bookId, "Глава 1", null, 0L, 0L, 0L).sync()
+            appMetaQueries.upsert(META_CURRENT_CHAPTER, cid).sync()
+        }
+        true
+    }
+
+    fun listBooks(): List<BookListEntry> = withDb {
+        bookQueries.selectAllOrdered().executeAsList().map { BookListEntry(it.id, it.title) }
+    }
+
+    /** Только обновляет название текущей книги и время (контент уже в строках chapter или paragraph). */
+    fun saveBookTitle(title: String) {
+        setCurrentBookTitle(title)
+    }
+
+    fun importBookFromV1TextOrNull(raw: String): Boolean {
+        val lines = raw.lines()
+        if (parseBookFormatV1Lines(lines) == null) return false
+        val bookId = newBookId()
+        withDb {
+            bookQueries.insertBook(bookId, "Импорт", System.currentTimeMillis()).sync()
+            applyLoadedBookFormatLinesForBook(this, bookId, lines, setCurrentChapterMeta = true)
+            appMetaQueries.upsert(META_CURRENT_BOOK_ID, bookId).sync()
+        }
+        return true
+    }
+
+    fun loadBook(bookId: String): Boolean {
+        if (!switchToBook(bookId)) return false
+        return true
+    }
+
+    fun deleteBook(bookId: String) {
+        val cur = currentBookId
+        withDb {
+            bookQueries.deleteById(bookId).sync()
+        }
+        File(booksDir, "$bookId.txt").delete()
+        if (cur == bookId) {
+            val next = withDb { bookQueries.selectAllOrdered().executeAsList().firstOrNull() }
+            if (next != null) {
+                switchToBook(next.id)
+            } else {
+                withDb {
+                    val bid = newBookId()
+                    val cid = newChapterId()
+                    bookQueries.insertBook(bid, "Без названия", System.currentTimeMillis()).sync()
+                    chapterQueries.insertChapter(cid, bid, "Глава 1", null, 0L, 0L, 0L).sync()
+                    appMetaQueries.upsert(META_CURRENT_BOOK_ID, bid).sync()
+                    appMetaQueries.upsert(META_CURRENT_CHAPTER, cid).sync()
+                }
+            }
+        }
+    }
+
+    var synthesisBackend: SynthesisBackend
+        get() = when (readSynthPrefs()["backend"]?.lowercase()) {
+            "local" -> SynthesisBackend.Local
+            else -> SynthesisBackend.Cloud
+        }
+        set(value) {
+            val m = readSynthPrefs()
+            m["backend"] = when (value) {
+                SynthesisBackend.Cloud -> "cloud"
+                SynthesisBackend.Local -> "local"
+            }
+            writeSynthPrefs(m)
+        }
+
+    var localTtsSettings: LocalTtsSettings
+        get() {
+            val m = readSynthPrefs()
+            val def = LocalTtsSettings()
+            return LocalTtsSettings(
+                baseUrl = m["local_base_url"]?.ifBlank { null } ?: def.baseUrl,
+                modelId = m["local_model"]?.ifBlank { null } ?: def.modelId,
+                sampleRate = m["local_sample_rate"]?.toIntOrNull() ?: def.sampleRate,
+            )
+        }
+        set(value) {
+            val m = readSynthPrefs()
+            m["local_base_url"] = value.baseUrl
+            m["local_model"] = value.modelId
+            m["local_sample_rate"] = value.sampleRate.toString()
+            writeSynthPrefs(m)
+        }
+
+    fun listChapters(): List<ChapterInfo> {
+        val bid = requireCurrentBookId()
+        return withDb {
+            chapterQueries.selectAllForList(bid).executeAsList().map { row ->
+                ChapterInfo(
+                    id = row.id,
+                    name = row.name,
+                    markupDone = row.markup_done != 0L,
+                    voiceDone = row.voice_done != 0L,
+                    exported = row.exported != 0L,
+                )
+            }
+        }
+    }
+
+    fun listChapterParagraphs(chapterId: String): List<StoredChapterParagraph> = withDb {
+        chapterQueries.selectParagraphsForChapter(chapterId).executeAsList().map { r ->
+            StoredChapterParagraph(r.ordinal.toInt(), r.original_text, r.marked_text)
+        }
+    }
+
+    fun setChapterMarkupDone(id: String, done: Boolean) {
+        withDb {
+            chapterQueries.updateMarkupDone(if (done) 1L else 0L, id).sync()
+        }
+    }
+
+    fun setChapterVoiceDone(id: String, done: Boolean) {
+        withDb {
+            chapterQueries.updateVoiceDone(if (done) 1L else 0L, id).sync()
+        }
+    }
+
+    fun setChapterExported(id: String, exported: Boolean) {
+        withDb {
+            chapterQueries.updateExported(if (exported) 1L else 0L, id).sync()
+        }
+    }
+
+    fun createChapter(name: String): String {
+        val id = newChapterId()
+        val bid = requireCurrentBookId()
+        withDb {
+            chapterQueries.insertChapter(id, bid, name, null, 0L, 0L, 0L).sync()
+            bookQueries.touchUpdatedAt(System.currentTimeMillis(), bid).sync()
+        }
+        return id
+    }
+
+    fun deleteChapter(id: String) {
+        withDb {
+            chapterQueries.deleteById(id).sync()
+        }
+        clearChapterCache(id)
+        if (currentChapterId == id) {
+            val remaining = listChapters()
+            currentChapterId = remaining.firstOrNull()?.id
+        }
+    }
+
+    fun renameChapter(id: String, name: String) {
+        withDb {
+            chapterQueries.updateName(name, id).sync()
+            val bid = chapterQueries.selectById(id).executeAsOneOrNull()?.book_id ?: return@withDb
+            bookQueries.touchUpdatedAt(System.currentTimeMillis(), bid).sync()
+        }
+    }
+
+    var currentChapterId: String?
+        get() = metaGet(META_CURRENT_CHAPTER)?.ifBlank { null }
+        set(value) {
+            if (value != null) metaSet(META_CURRENT_CHAPTER, value) else metaDelete(META_CURRENT_CHAPTER)
+        }
+
+    @Deprecated("Используйте currentBookTitle() или currentBookId", ReplaceWith("currentBookTitle()"))
+    var currentBookName: String
+        get() = currentBookTitle()
+        set(bookValue) {
+            if (bookValue.isNotBlank()) setCurrentBookTitle(bookValue)
+        }
+
+    fun ensureCurrentChapter(): String {
+        val bookId = requireCurrentBookId()
+        val cur = currentChapterId
+        if (cur != null) {
+            val row = withDb { chapterQueries.selectById(cur).executeAsOneOrNull() }
+            if (row != null && row.book_id == bookId) return cur
+        }
+        val chapters = listChapters()
+        val id = if (chapters.isNotEmpty()) {
+            chapters.first().id
+        } else {
+            createChapter("Глава 1")
+        }
+        currentChapterId = id
+        return id
+    }
+
+    fun getChapterText(id: String): String =
+        withDb { joinedMarked(id) }
+
+    fun setChapterText(id: String, text: String) {
+        withDb {
+            val row = chapterQueries.selectById(id).executeAsOneOrNull() ?: return@withDb
+            val oldMarked = joinedMarked(id)
+            if (oldMarked != text && row.exported != 0L) {
+                chapterQueries.invalidateExportIfExported(id).sync()
+            }
+            val newMarked = TextParser.splitParagraphsForStorage(text)
+            val oldPairs = paragraphPairs(id)
+            val o = oldPairs.map { it.first }
+            if (newMarked.isEmpty() && o.isEmpty()) {
+                chapterQueries.deleteParagraphsForChapter(id).sync()
+                return@withDb
+            }
+            val n = maxOf(o.size, newMarked.size)
+            val pairs = List(n) { i -> o.getOrElse(i) { "" } to newMarked.getOrElse(i) { "" } }
+            replaceChapterParagraphs(id, pairs)
+            bookQueries.touchUpdatedAt(System.currentTimeMillis(), row.book_id).sync()
+        }
+    }
+
+    fun getOriginalText(id: String): String =
+        withDb { joinedOriginal(id) }
+
+    fun setOriginalText(id: String, text: String) {
+        withDb {
+            val row = chapterQueries.selectById(id).executeAsOneOrNull() ?: return@withDb
+            val oldOrig = joinedOriginal(id)
+            if (oldOrig != text && row.exported != 0L) {
+                chapterQueries.invalidateExportIfExported(id).sync()
+            }
+            val newOrig = TextParser.splitParagraphsForStorage(text)
+            val oldPairs = paragraphPairs(id)
+            val m = oldPairs.map { it.second }
+            if (newOrig.isEmpty() && m.isEmpty()) {
+                chapterQueries.deleteParagraphsForChapter(id).sync()
+                return@withDb
+            }
+            val n = maxOf(newOrig.size, m.size)
+            val pairs = List(n) { i -> newOrig.getOrElse(i) { "" } to m.getOrElse(i) { "" } }
+            replaceChapterParagraphs(id, pairs)
+            bookQueries.touchUpdatedAt(System.currentTimeMillis(), row.book_id).sync()
+        }
+    }
+
+    var voiceMapping: Map<String, VoiceSettings>
+        get() {
+            val bid = requireCurrentBookId()
+            return withDb {
+                voiceMappingQueries.selectAllForBook(bid).executeAsList().associate { row ->
+                    row.speaker_name to VoiceSettings(row.voice, row.role, row.speed, row.pitch_shift)
+                }
+            }
+        }
+        set(value) {
+            val bid = requireCurrentBookId()
+            withDb {
+                voiceMappingQueries.deleteAllForBook(bid).sync()
+                for ((name, s) in value) {
+                    voiceMappingQueries.insertRow(bid, name, s.voice, s.role, s.speed, s.pitchShift).sync()
+                }
+                bookQueries.touchUpdatedAt(System.currentTimeMillis(), bid).sync()
+            }
+        }
+
+    fun getChapterAudioPath(id: String): String? =
+        withDb {
+            chapterQueries.selectById(id).executeAsOneOrNull()?.audio_path?.trim()?.ifBlank { null }
+        }
+
+    fun setChapterAudioPath(id: String, path: String) {
+        withDb {
+            val row = chapterQueries.selectById(id).executeAsOneOrNull()
+            val newPath = path.trim()
+            val old = row?.audio_path?.trim().orEmpty()
+            if (old != newPath && row?.exported != 0L) {
+                chapterQueries.invalidateExportIfExported(id).sync()
+            }
+            chapterQueries.updateAudioPath(newPath.ifBlank { null }, id).sync()
+            row?.book_id?.let { bookQueries.touchUpdatedAt(System.currentTimeMillis(), it).sync() }
+        }
+    }
+
+    fun clearChapterAudioPath(id: String) {
+        withDb {
+            val row = chapterQueries.selectById(id).executeAsOneOrNull()
+            if (row?.audio_path != null && row.exported != 0L) {
+                chapterQueries.invalidateExportIfExported(id).sync()
+            }
+            chapterQueries.clearAudioPath(id).sync()
+            row?.book_id?.let { bookQueries.touchUpdatedAt(System.currentTimeMillis(), it).sync() }
+        }
+    }
+
+    fun getChapterCacheDir(id: String): File =
+        File(System.getProperty("user.home"), "SpeechHelper/cache/$id").apply { mkdirs() }
+
+    fun clearChapterCache(id: String) {
+        val cacheDir = File(System.getProperty("user.home"), "SpeechHelper/cache/$id")
+        if (cacheDir.exists()) {
+            cacheDir.deleteRecursively()
+        }
+    }
+
+    var windowWidth: Int
+        get() = metaGet(META_WINDOW_W)?.toIntOrNull() ?: 800
+        set(value) {
+            metaSet(META_WINDOW_W, value.toString())
+        }
+
+    var windowHeight: Int
+        get() = metaGet(META_WINDOW_H)?.toIntOrNull() ?: 600
+        set(value) {
+            metaSet(META_WINDOW_H, value.toString())
+        }
+
+    fun saveWindowSize(width: Int, height: Int) {
+        metaSet(META_WINDOW_W, width.toString())
+        metaSet(META_WINDOW_H, height.toString())
     }
 
     fun clearAllData() {
         withDb {
             chapterQueries.deleteAll().sync()
             voiceMappingQueries.deleteAll().sync()
+            bookQueries.deleteAll().sync()
             appMetaQueries.deleteAll().sync()
         }
         val cacheRoot = File(System.getProperty("user.home"), "SpeechHelper/cache")
         if (cacheRoot.exists()) cacheRoot.deleteRecursively()
+        withDb {
+            val bid = newBookId()
+            val cid = newChapterId()
+            bookQueries.insertBook(bid, "Без названия", System.currentTimeMillis()).sync()
+            chapterQueries.insertChapter(cid, bid, "Глава 1", null, 0L, 0L, 0L).sync()
+            appMetaQueries.upsert(META_CURRENT_BOOK_ID, bid).sync()
+            appMetaQueries.upsert(META_CURRENT_CHAPTER, cid).sync()
+        }
     }
 }

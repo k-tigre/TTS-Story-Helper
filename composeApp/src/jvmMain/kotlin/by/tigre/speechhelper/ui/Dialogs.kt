@@ -39,9 +39,12 @@ import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import kotlinx.coroutines.launch
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import by.tigre.speechhelper.data.BookListEntry
 import by.tigre.speechhelper.domain.ChapterInfo
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.SpanStyle
@@ -455,23 +458,36 @@ fun SaveBookDialog(
 @Composable
 fun LoadBookDialog(
     onDismiss: () -> Unit,
-    onLoad: (name: String) -> Unit,
-    onDelete: (name: String) -> Unit,
+    onLoad: (bookId: String) -> Unit,
+    onDelete: (bookId: String) -> Unit,
 ) {
-    var books by remember { mutableStateOf(SessionStorage.listBooks()) }
+    val scope = rememberCoroutineScope()
+    var books by remember { mutableStateOf<List<BookListEntry>>(emptyList()) }
     var confirmDeleteBook by remember { mutableStateOf<String?>(null) }
+    var confirmDeleteTitle by remember { mutableStateOf<String?>(null) }
+
+    LaunchedEffect(Unit) {
+        books = SessionStorage.listBooksSuspend()
+    }
 
     if (confirmDeleteBook != null) {
         AlertDialog(
-            onDismissRequest = { confirmDeleteBook = null },
+            onDismissRequest = { confirmDeleteBook = null; confirmDeleteTitle = null },
             title = { Text("Удалить книгу?") },
-            text = { Text("Книга \"$confirmDeleteBook\" будет удалена.") },
+            text = {
+                val label = confirmDeleteTitle.orEmpty()
+                Text("Книга \"$label\" будет удалена.")
+            },
             confirmButton = {
                 Button(
                     onClick = {
-                        onDelete(confirmDeleteBook!!)
+                        val id = confirmDeleteBook!!
+                        onDelete(id)
                         confirmDeleteBook = null
-                        books = SessionStorage.listBooks()
+                        confirmDeleteTitle = null
+                        scope.launch {
+                            books = SessionStorage.listBooksSuspend()
+                        }
                     },
                     colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
                 ) {
@@ -479,7 +495,7 @@ fun LoadBookDialog(
                 }
             },
             dismissButton = {
-                TextButton(onClick = { confirmDeleteBook = null }) { Text("Отмена") }
+                TextButton(onClick = { confirmDeleteBook = null; confirmDeleteTitle = null }) { Text("Отмена") }
             },
         )
     }
@@ -495,18 +511,21 @@ fun LoadBookDialog(
                     modifier = Modifier.verticalScroll(rememberScrollState()),
                     verticalArrangement = Arrangement.spacedBy(4.dp),
                 ) {
-                    books.forEach { bookName ->
+                    books.forEach { book ->
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
                             modifier = Modifier.fillMaxWidth(),
                         ) {
                             TextButton(
-                                onClick = { onLoad(bookName) },
+                                onClick = { onLoad(book.id) },
                                 modifier = Modifier.weight(1f),
                             ) {
-                                Text(text = bookName, modifier = Modifier.fillMaxWidth())
+                                Text(text = book.title, modifier = Modifier.fillMaxWidth())
                             }
-                            IconButton(onClick = { confirmDeleteBook = bookName }) {
+                            IconButton(onClick = {
+                                confirmDeleteBook = book.id
+                                confirmDeleteTitle = book.title
+                            }) {
                                 Text(
                                     "\u2716",
                                     style = MaterialTheme.typography.bodySmall,

@@ -49,17 +49,17 @@ sealed class SegmentViewVoiceFilter {
 
 class MainViewModel(private val scope: CoroutineScope) {
 
-    // Chapter management
-    var chapters by mutableStateOf(SessionStorage.listChapters())
+    // Chapter management (гидратация с потока SQLite в [init])
+    var chapters by mutableStateOf<List<ChapterInfo>>(emptyList())
         private set
-    var currentChapterId by mutableStateOf(SessionStorage.ensureCurrentChapter())
+    var currentChapterId by mutableStateOf("")
         private set
-    var currentBookName by mutableStateOf(SessionStorage.currentBookName)
+    var currentBookName by mutableStateOf("")
         private set
 
     // Chapter text
-    var text by mutableStateOf(SessionStorage.getChapterText(currentChapterId))
-    var originalText by mutableStateOf(SessionStorage.getOriginalText(currentChapterId))
+    var text by mutableStateOf("")
+    var originalText by mutableStateOf("")
 
     // Simple synthesis settings
     var selectedVoice by mutableStateOf(API_VOICES[0])
@@ -87,7 +87,7 @@ class MainViewModel(private val scope: CoroutineScope) {
     var statusMessage by mutableStateOf("")
 
     // Audio path
-    var chapterAudioPath by mutableStateOf<String?>(SessionStorage.getChapterAudioPath(currentChapterId))
+    var chapterAudioPath by mutableStateOf<String?>(null)
         private set
 
     // Player state (set from both ViewModel and composable LaunchedEffects)
@@ -169,8 +169,21 @@ class MainViewModel(private val scope: CoroutineScope) {
     }
 
     init {
-        voiceMapping.putAll(SessionStorage.voiceMapping)
-        ensureVoiceMain()
+        scope.launch {
+            val snap = SessionStorage.loadInitialSnapshot()
+            chapters = snap.chapters
+            currentChapterId = snap.currentChapterId
+            currentBookName = snap.currentBookTitle
+            text = snap.chapterText
+            originalText = snap.originalText
+            chapterAudioPath = snap.chapterAudioPath
+            voiceMapping.clear()
+            voiceMapping.putAll(snap.voiceMapping)
+            synthesisBackend = snap.synthesisBackend
+            localTtsSettings = snap.localTtsSettings
+            ensureVoiceMain()
+            revalidate()
+        }
     }
 
     private fun ensureVoiceMain() {
@@ -270,7 +283,7 @@ class MainViewModel(private val scope: CoroutineScope) {
         originalText = SessionStorage.getOriginalText(id)
         chapterAudioPath = null
         voiceMapping.clear()
-        currentBookName = ""
+        currentBookName = SessionStorage.currentBookTitle()
         synthesisBackend = SessionStorage.synthesisBackend
         localTtsSettings = SessionStorage.localTtsSettings
         segmentViewVoiceFilter = SegmentViewVoiceFilter.All
@@ -281,11 +294,11 @@ class MainViewModel(private val scope: CoroutineScope) {
     // ── Book management ───────────────────────────────────────────────────────
 
     fun saveCurrentBook() {
+        saveCurrentChapter()
+        saveVoiceMapping()
         if (currentBookName.isNotBlank()) {
-            saveCurrentChapter()
-            saveVoiceMapping()
-            SessionStorage.saveBook(currentBookName)
-            statusMessage = "Книга \"$currentBookName\" сохранена"
+            SessionStorage.saveBookTitle(currentBookName)
+            statusMessage = "Сохранено: \"${SessionStorage.currentBookTitle()}\""
         } else {
             showSaveBookDialog = true
         }
@@ -294,16 +307,15 @@ class MainViewModel(private val scope: CoroutineScope) {
     fun saveBook(bookName: String) {
         saveCurrentChapter()
         saveVoiceMapping()
-        SessionStorage.saveBook(bookName)
-        currentBookName = bookName
-        SessionStorage.currentBookName = bookName
-        statusMessage = "Книга \"$bookName\" сохранена"
+        SessionStorage.saveBookTitle(bookName)
+        currentBookName = SessionStorage.currentBookTitle()
+        statusMessage = "Название: \"${currentBookName}\""
         showSaveBookDialog = false
     }
 
-    fun loadBook(bookName: String) {
+    fun loadBook(bookId: String) {
         saveCurrentChapter()
-        if (SessionStorage.loadBook(bookName)) {
+        if (SessionStorage.loadBook(bookId)) {
             chapters = SessionStorage.listChapters()
             val id = SessionStorage.ensureCurrentChapter()
             currentChapterId = id
@@ -312,12 +324,11 @@ class MainViewModel(private val scope: CoroutineScope) {
             chapterAudioPath = SessionStorage.getChapterAudioPath(id)
             voiceMapping.clear()
             voiceMapping.putAll(SessionStorage.voiceMapping)
-            currentBookName = bookName
-            SessionStorage.currentBookName = bookName
+            currentBookName = SessionStorage.currentBookTitle()
             segmentViewVoiceFilter = SegmentViewVoiceFilter.All
-            statusMessage = "Книга \"$bookName\" загружена"
+            statusMessage = "Открыта \"" + currentBookName + "\""
         } else {
-            statusMessage = "Ошибка: не удалось загрузить книгу"
+            statusMessage = "Ошибка: не удалось открыть книгу"
         }
         showLoadBookDialog = false
     }
@@ -381,8 +392,8 @@ class MainViewModel(private val scope: CoroutineScope) {
             text = SessionStorage.getChapterText(id)
             chapterAudioPath = null
             voiceMapping.clear()
-            currentBookName = book.title
-            SessionStorage.currentBookName = book.title
+            SessionStorage.setCurrentBookTitle(book.title)
+            currentBookName = SessionStorage.currentBookTitle()
             segmentViewVoiceFilter = SegmentViewVoiceFilter.All
             statusMessage = "Импортировано: \"${book.title}\" (${book.chapters.size} глав)"
         } catch (e: Exception) {
