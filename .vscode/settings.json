@@ -1,0 +1,8 @@
+{
+  "java.configuration.updateBuildConfiguration": "automatic",
+  "java.import.gradle.enabled": true,
+  "java.gradle.buildServer.enabled": "on",
+  "gradle.javaDebug": {
+    "tasks": ["composeApp:run"]
+  }
+}

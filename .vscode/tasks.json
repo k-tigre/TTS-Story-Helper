@@ -1,0 +1,81 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "composeApp:run",
+      "type": "process",
+      "command": "${workspaceFolder}/gradlew",
+      "args": [":composeApp:run"],
+      "windows": {
+        "command": "${workspaceFolder}\\gradlew.bat",
+        "args": [":composeApp:run"]
+      },
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared",
+        "focus": true
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "composeApp:run (--debug-jvm)",
+      "type": "process",
+      "command": "${workspaceFolder}/gradlew",
+      "args": [":composeApp:run", "--debug-jvm"],
+      "windows": {
+        "command": "${workspaceFolder}\\gradlew.bat",
+        "args": [":composeApp:run", "--debug-jvm"]
+      },
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "group": "build",
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared",
+        "focus": true
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "composeApp:run (debug-jvm, wait for JDWP)",
+      "type": "shell",
+      "command": "\"${workspaceFolder}/gradlew\" \":composeApp:run\" --debug-jvm",
+      "windows": {
+        "command": "& \"${workspaceFolder}\\gradlew.bat\" \":composeApp:run\" --debug-jvm"
+      },
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "isBackground": true,
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared",
+        "focus": true
+      },
+      "problemMatcher": {
+        "owner": "composeApp-jdwp",
+        "pattern": [
+          {
+            "regexp": "\\b\\B",
+            "file": 1,
+            "location": 2,
+            "message": 3
+          }
+        ],
+        "background": {
+          "activeOnStart": true,
+          "beginsPattern": ".",
+          "endsPattern": "Listening for transport dt_socket"
+        }
+      }
+    }
+  ]
+}
