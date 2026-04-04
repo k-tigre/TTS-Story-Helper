@@ -412,9 +412,14 @@ fun MainScreen() {
                             dialogs.showTokenDialog = true
                             return@OutlinedButton
                         }
-                        vm.launchAutoMarkup()
+                        if (vm.hasMarkers) {
+                            dialogs.autoMarkupRemarkingPendingChapterIds = null
+                            dialogs.showAutoMarkupRemarkingDialog = true
+                        } else {
+                            vm.launchAutoMarkup()
+                        }
                     },
-                    enabled = vm.text.isNotBlank() && !vm.isLoading && !vm.hasMarkers,
+                    enabled = vm.text.isNotBlank() && !vm.isLoading,
                 ) {
                     Text("Авто-разметка")
                 }

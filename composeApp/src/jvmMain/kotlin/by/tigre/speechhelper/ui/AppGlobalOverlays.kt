@@ -21,6 +21,7 @@ import androidx.compose.ui.unit.dp
 import by.tigre.speechhelper.TokenStorage
 import by.tigre.speechhelper.data.SessionStorage
 import by.tigre.speechhelper.domain.SynthesisBackend
+import by.tigre.speechhelper.domain.TextParser
 import by.tigre.speechhelper.ui.vm.RootViewModel
 
 /** Глобальные диалоги; состояние — [RootViewModel.dialogs]. */
@@ -105,8 +106,16 @@ fun AppGlobalOverlays(root: RootViewModel) {
                 if (!TokenStorage.hasCredentials()) {
                     dialogs.showTokenDialog = true
                 } else {
-                    vm.launchAutoMarkupForChapters(ids)
-                    dialogs.showChaptersWorkflowDialog = false
+                    val distinct = ids.distinct().filter { SessionStorage.getChapterText(it).isNotBlank() }
+                    val anyMarked =
+                        distinct.any { TextParser.hasVoiceMarkers(SessionStorage.getChapterText(it)) }
+                    if (anyMarked) {
+                        dialogs.autoMarkupRemarkingPendingChapterIds = distinct
+                        dialogs.showAutoMarkupRemarkingDialog = true
+                    } else {
+                        vm.launchAutoMarkupForChapters(distinct)
+                        dialogs.showChaptersWorkflowDialog = false
+                    }
                 }
             },
             onLaunchBatchSynthesis = { ids ->
@@ -171,6 +180,48 @@ fun AppGlobalOverlays(root: RootViewModel) {
             },
             dismissButton = {
                 TextButton(onClick = { dialogs.showResetMarkupDialog = false }) { Text("Отмена") }
+            },
+        )
+    }
+
+    if (dialogs.showAutoMarkupRemarkingDialog) {
+        val batch = dialogs.autoMarkupRemarkingPendingChapterIds
+        val message =
+            if (batch == null) {
+                "В тексте главы уже есть голосовые теги. Авто-разметка выполнит переразметку: текущая разметка будет заменена новой."
+            } else {
+                "Среди выбранных глав есть текст с разметкой. Авто-разметка выполнит переразметку для этих глав (теги будут заменены новыми)."
+            }
+        AlertDialog(
+            onDismissRequest = {
+                dialogs.showAutoMarkupRemarkingDialog = false
+                dialogs.autoMarkupRemarkingPendingChapterIds = null
+            },
+            title = { Text("Переразметка?") },
+            text = { Text(message) },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        if (batch == null) {
+                            vm.launchAutoMarkup()
+                        } else {
+                            vm.launchAutoMarkupForChapters(batch)
+                            dialogs.showChaptersWorkflowDialog = false
+                        }
+                        dialogs.showAutoMarkupRemarkingDialog = false
+                        dialogs.autoMarkupRemarkingPendingChapterIds = null
+                    },
+                ) {
+                    Text("Продолжить")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = {
+                    dialogs.showAutoMarkupRemarkingDialog = false
+                    dialogs.autoMarkupRemarkingPendingChapterIds = null
+                }) {
+                    Text("Отмена")
+                }
             },
         )
     }
