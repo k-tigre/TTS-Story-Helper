@@ -99,6 +99,12 @@ object OpenAiMarkupApi {
         emit(MarkupResult.Done(results.joinToString("\n")))
     }
 
+    suspend fun markupChunkForPrompt(
+        text: String,
+        config: LlmConfig,
+        systemPrompt: String,
+    ): String = requestMarkup(text, config, systemPrompt)
+
     private suspend fun requestMarkup(
         text: String,
         config: LlmConfig,

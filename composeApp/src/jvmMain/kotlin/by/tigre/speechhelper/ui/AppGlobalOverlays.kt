@@ -1,6 +1,8 @@
 package by.tigre.speechhelper.ui
 
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.rememberScrollState
@@ -9,6 +11,7 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -20,6 +23,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import by.tigre.speechhelper.TokenStorage
 import by.tigre.speechhelper.data.SessionStorage
+import by.tigre.speechhelper.domain.AutoMarkupMode
 import by.tigre.speechhelper.domain.SynthesisBackend
 import by.tigre.speechhelper.domain.TextParser
 import by.tigre.speechhelper.ui.vm.RootViewModel
@@ -110,10 +114,10 @@ fun AppGlobalOverlays(root: RootViewModel) {
                     val anyMarked =
                         distinct.any { TextParser.hasVoiceMarkers(SessionStorage.getChapterText(it)) }
                     if (anyMarked) {
-                        dialogs.autoMarkupRemarkingPendingChapterIds = distinct
-                        dialogs.showAutoMarkupRemarkingDialog = true
+                        dialogs.autoMarkupModeDialogChapterIds = distinct
+                        dialogs.showAutoMarkupModeDialog = true
                     } else {
-                        vm.launchAutoMarkupForChapters(distinct)
+                        vm.launchAutoMarkupForChapters(distinct, AutoMarkupMode.FillMissing)
                         dialogs.showChaptersWorkflowDialog = false
                     }
                 }
@@ -184,44 +188,45 @@ fun AppGlobalOverlays(root: RootViewModel) {
         )
     }
 
-    if (dialogs.showAutoMarkupRemarkingDialog) {
-        val batch = dialogs.autoMarkupRemarkingPendingChapterIds
+    if (dialogs.showAutoMarkupModeDialog) {
+        val batch = dialogs.autoMarkupModeDialogChapterIds
+        fun closeAutoMarkupModeDialog() {
+            dialogs.showAutoMarkupModeDialog = false
+            dialogs.autoMarkupModeDialogChapterIds = null
+        }
+        fun launchChosenMode(mode: AutoMarkupMode) {
+            if (batch == null) {
+                vm.launchAutoMarkup(mode)
+            } else {
+                vm.launchAutoMarkupForChapters(batch, mode)
+                dialogs.showChaptersWorkflowDialog = false
+            }
+            closeAutoMarkupModeDialog()
+        }
         val message =
             if (batch == null) {
-                "В тексте главы уже есть голосовые теги. Авто-разметка выполнит переразметку: текущая разметка будет заменена новой."
+                "В тексте уже есть голосовые теги. Можно разметить только абзацы без тегов или переразметить всю главу целиком (результат пишется в базу после каждого абзаца; сбой отдельного запроса не откатывает уже принятые абзацы)."
             } else {
-                "Среди выбранных глав есть текст с разметкой. Авто-разметка выполнит переразметку для этих глав (теги будут заменены новыми)."
+                "Среди выбранных глав есть размеченный текст. Добавить теги только там, где их ещё нет, или полностью переразметить каждую главу."
             }
         AlertDialog(
-            onDismissRequest = {
-                dialogs.showAutoMarkupRemarkingDialog = false
-                dialogs.autoMarkupRemarkingPendingChapterIds = null
-            },
-            title = { Text("Переразметка?") },
-            text = { Text(message) },
-            confirmButton = {
-                Button(
-                    onClick = {
-                        if (batch == null) {
-                            vm.launchAutoMarkup()
-                        } else {
-                            vm.launchAutoMarkupForChapters(batch)
-                            dialogs.showChaptersWorkflowDialog = false
+            onDismissRequest = { closeAutoMarkupModeDialog() },
+            title = { Text("Авто-разметка") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Text(message)
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedButton(onClick = { launchChosenMode(AutoMarkupMode.FillMissing) }) {
+                            Text("Только недостающее")
                         }
-                        dialogs.showAutoMarkupRemarkingDialog = false
-                        dialogs.autoMarkupRemarkingPendingChapterIds = null
-                    },
-                ) {
-                    Text("Продолжить")
+                        Button(onClick = { launchChosenMode(AutoMarkupMode.FullRemark) }) {
+                            Text("Переразметить всё")
+                        }
+                    }
                 }
             },
-            dismissButton = {
-                TextButton(onClick = {
-                    dialogs.showAutoMarkupRemarkingDialog = false
-                    dialogs.autoMarkupRemarkingPendingChapterIds = null
-                }) {
-                    Text("Отмена")
-                }
+            confirmButton = {
+                TextButton(onClick = { closeAutoMarkupModeDialog() }) { Text("Отмена") }
             },
         )
     }

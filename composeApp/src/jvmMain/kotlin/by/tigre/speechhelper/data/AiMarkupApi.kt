@@ -8,6 +8,8 @@ import io.ktor.http.ContentType
 import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpStatusCode
 import io.ktor.http.contentType
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import by.tigre.speechhelper.domain.TextParser
@@ -45,7 +47,9 @@ private data class Choice(
 
 object AiMarkupApi {
     private const val ENDPOINT = "https://ai.api.cloud.yandex.net/v1/chat/completions"
-    private const val DEFAULT_CHUNK_LIMIT = 3000
+    private const val MAX_SEND_RETRIES = 3
+    private const val INITIAL_RETRY_DELAY_MS = 1000L
+    const val DEFAULT_YANDEX_MARKUP_CHUNK_CHARS = 3000
 
     private val json = HttpClientProvider.jsonInstance
     private val client = HttpClientProvider.markupClient
@@ -56,7 +60,7 @@ object AiMarkupApi {
         folderId: String,
     ): Flow<MarkupResult> = flow {
         val model = "gpt://$folderId/deepseek-v32/latest"
-        val chunks = splitTextForAi(text, DEFAULT_CHUNK_LIMIT)
+        val chunks = splitTextForAi(text, DEFAULT_YANDEX_MARKUP_CHUNK_CHARS)
         println("[AiFixDialog] Text split into ${chunks.size} chunk(s)")
 
         val results = mutableListOf<String>()
@@ -84,7 +88,7 @@ object AiMarkupApi {
         existingVoices: Set<String> = emptySet(),
     ): Flow<MarkupResult> = flow {
         val systemPrompt = MarkupSystemPrompts.autoMarkupPrompt(existingVoices)
-        val chunks = splitTextForAi(text, DEFAULT_CHUNK_LIMIT)
+        val chunks = splitTextForAi(text, DEFAULT_YANDEX_MARKUP_CHUNK_CHARS)
         println("[AiMarkup] Text split into ${chunks.size} chunk(s), existingVoices=$existingVoices")
 
         if (chunks.size == 1) {
@@ -146,6 +150,13 @@ object AiMarkupApi {
         return postProcessAiMarkup(firstResult.replace("```", ""))
     }
 
+    suspend fun markupChunkForPrompt(
+        text: String,
+        token: String,
+        folderId: String,
+        systemPrompt: String,
+    ): String = requestMarkup(text, token, folderId, systemPrompt)
+
     /**
      * AI иногда возвращает теги в формате <voice_name> вместо [voice_name].
      * Заменяем угловые скобки на квадратные для тегов голосов.
@@ -178,33 +189,54 @@ object AiMarkupApi {
         )
 
         val totalChars = messages.sumOf { it.content.length }
-        println("[AiMarkup] -> POST $ENDPOINT (model=$model, messages=${messages.size}, totalChars=$totalChars)")
+        var lastException: Exception? = null
+        var delayMs = INITIAL_RETRY_DELAY_MS
 
-        val startTime = System.currentTimeMillis()
-        val response = client.post(ENDPOINT) {
-            header(HttpHeaders.Authorization, "Api-Key $token")
-            contentType(ContentType.Application.Json)
-            setBody(request)
+        for (attempt in 1..MAX_SEND_RETRIES) {
+            val startTime = System.currentTimeMillis()
+            try {
+                println(
+                    "[AiMarkup] -> POST $ENDPOINT (model=$model, messages=${messages.size}, " +
+                        "totalChars=$totalChars, attempt=$attempt)",
+                )
+                val response = client.post(ENDPOINT) {
+                    header(HttpHeaders.Authorization, "Api-Key $token")
+                    contentType(ContentType.Application.Json)
+                    setBody(request)
+                }
+                val elapsed = System.currentTimeMillis() - startTime
+
+                println("[AiMarkup] <- HTTP ${response.status.value} (${elapsed}ms)")
+
+                if (response.status != HttpStatusCode.OK) {
+                    val responseBody = response.bodyAsText()
+                    println("[AiMarkup] ERROR: $responseBody")
+                    throw AiMarkupException("AI API error ${response.status.value}: $responseBody")
+                }
+
+                val responseText = response.bodyAsText()
+                val chatResponse = json.decodeFromString<ChatResponse>(responseText)
+                val content = chatResponse.choices.firstOrNull()?.message?.content
+                    ?: throw AiMarkupException("No content in AI response: $responseText")
+                println("[AiMarkup] <- Received ${content.length} chars")
+                return content
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                lastException = e
+                println("[AiMarkup] Error on attempt $attempt: ${e.message}")
+                if (attempt < MAX_SEND_RETRIES) {
+                    println("[AiMarkup] Retrying in ${delayMs}ms...")
+                    delay(delayMs)
+                    delayMs *= 2
+                }
+            }
         }
-        val elapsed = System.currentTimeMillis() - startTime
 
-        println("[AiMarkup] <- HTTP ${response.status.value} (${elapsed}ms)")
-
-        if (response.status != HttpStatusCode.OK) {
-            val responseBody = response.bodyAsText()
-            println("[AiMarkup] ERROR: $responseBody")
-            throw AiMarkupException("AI API error ${response.status.value}: $responseBody")
-        }
-
-        val responseText = response.bodyAsText()
-        val chatResponse = json.decodeFromString<ChatResponse>(responseText)
-        val content = chatResponse.choices.firstOrNull()?.message?.content
-            ?: throw AiMarkupException("No content in AI response: $responseText")
-        println("[AiMarkup] <- Received ${content.length} chars")
-        return content
+        throw lastException ?: AiMarkupException("Unknown error after $MAX_SEND_RETRIES attempts")
     }
 
-    internal fun splitTextForAi(text: String, chunkLimit: Int = DEFAULT_CHUNK_LIMIT): List<String> {
+    internal fun splitTextForAi(text: String, chunkLimit: Int = DEFAULT_YANDEX_MARKUP_CHUNK_CHARS): List<String> {
         if (text.length <= chunkLimit) return listOf(text)
 
         val chunks = mutableListOf<String>()

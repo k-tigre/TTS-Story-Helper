@@ -77,6 +77,7 @@ import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.unit.dp
 import by.tigre.speechhelper.TokenStorage
 import by.tigre.speechhelper.ui.vm.RootViewModel
+import by.tigre.speechhelper.domain.AutoMarkupMode
 import by.tigre.speechhelper.domain.LOCAL_TTS_SAMPLE_RATES
 import by.tigre.speechhelper.domain.SynthesisBackend
 import by.tigre.speechhelper.domain.ParagraphMapping
@@ -413,10 +414,10 @@ fun MainScreen() {
                             return@OutlinedButton
                         }
                         if (vm.hasMarkers) {
-                            dialogs.autoMarkupRemarkingPendingChapterIds = null
-                            dialogs.showAutoMarkupRemarkingDialog = true
+                            dialogs.autoMarkupModeDialogChapterIds = null
+                            dialogs.showAutoMarkupModeDialog = true
                         } else {
-                            vm.launchAutoMarkup()
+                            vm.launchAutoMarkup(AutoMarkupMode.FillMissing)
                         }
                     },
                     enabled = vm.text.isNotBlank() && !vm.isLoading,

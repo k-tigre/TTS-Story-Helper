@@ -1162,6 +1162,53 @@ object SessionStorage {
         }
     }
 
+    private const val AUTO_MARKUP_FP_PREFIX = "auto_markup_src_fp:"
+
+    private fun autoMarkupFpKey(chapterId: String) = "$AUTO_MARKUP_FP_PREFIX$chapterId"
+
+    fun loadAutoMarkupSourceFingerprints(chapterId: String): Map<Int, String> {
+        val raw = withDb { appMetaQueries.getValue(autoMarkupFpKey(chapterId)).executeAsOneOrNull() }
+            ?: return emptyMap()
+        return raw.lines().mapNotNull { line ->
+            val p = line.split('=', limit = 2)
+            if (p.size != 2) return@mapNotNull null
+            val ord = p[0].trim().toIntOrNull() ?: return@mapNotNull null
+            ord to p[1].trim()
+        }.toMap()
+    }
+
+    fun saveAutoMarkupSourceFingerprint(chapterId: String, ordinal: Int, fingerprintHex: String) {
+        withDb {
+            val key = autoMarkupFpKey(chapterId)
+            val cur = appMetaQueries.getValue(key).executeAsOneOrNull()?.lines()
+                ?.mapNotNull { line ->
+                    val p = line.split('=', limit = 2)
+                    if (p.size != 2) return@mapNotNull null
+                    val o = p[0].trim().toIntOrNull() ?: return@mapNotNull null
+                    o to p[1].trim()
+                }?.toMap()?.toMutableMap() ?: mutableMapOf()
+            cur[ordinal] = fingerprintHex
+            val text = cur.toSortedMap().entries.joinToString("\n") { "${it.key}=${it.value}" }
+            appMetaQueries.upsert(key, text).sync()
+        }
+    }
+
+    fun clearAutoMarkupSourceFingerprints(chapterId: String) {
+        withDb { appMetaQueries.deleteKey(autoMarkupFpKey(chapterId)).sync() }
+    }
+
+    /** Заменить все абзацы главы (оригинал + разметка) одним списком пар, с инвалидацией экспорта при необходимости. */
+    fun replaceAllParagraphsForChapter(chapterId: String, pairs: List<Pair<String, String>>) {
+        withDb {
+            val row = chapterQueries.selectById(chapterId).executeAsOneOrNull() ?: return@withDb
+            if (row.exported != 0L) {
+                chapterQueries.invalidateExportIfExported(chapterId).sync()
+            }
+            replaceChapterParagraphs(chapterId, pairs)
+            bookQueries.touchUpdatedAt(System.currentTimeMillis(), row.book_id).sync()
+        }
+    }
+
     /**
      * Атомарно: сохранить размеченный текст у [fromChapterId] (если изменился), выставить текущую главу,
      * вернуть контент [toChapterId] одним проходом (меньше round-trip к потоку БД).

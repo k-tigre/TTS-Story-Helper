@@ -5,12 +5,16 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import by.tigre.speechhelper.TokenStorage
 import by.tigre.speechhelper.data.AiMarkupApi
+import by.tigre.speechhelper.data.AutoMarkupFingerprint
+import by.tigre.speechhelper.data.AutoMarkupParagraphPlanner
 import by.tigre.speechhelper.data.MarkupResult
+import by.tigre.speechhelper.data.MarkupSystemPrompts
 import by.tigre.speechhelper.data.OpenAiMarkupApi
 import by.tigre.speechhelper.data.SessionStorage
 import by.tigre.speechhelper.data.SpeechSynthesizer
 import by.tigre.speechhelper.data.SynthesisResult
 import by.tigre.speechhelper.data.WavMerge
+import by.tigre.speechhelper.domain.AutoMarkupMode
 import by.tigre.speechhelper.domain.ChapterInfo
 import by.tigre.speechhelper.domain.LlmConfig
 import by.tigre.speechhelper.domain.LocalTtsSettings
@@ -29,6 +33,7 @@ import javax.swing.JFileChooser
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.yield
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -47,7 +52,7 @@ class MainViewModel(
     val library: BookLibraryViewModel
     val editor: EditorWorkspaceViewModel
 
-    private var pendingMarkupChapterIds: List<String>? = null
+    private var pendingAutoMarkupWork: Pair<List<String>, AutoMarkupMode>? = null
 
     var synthesisBackend by mutableStateOf(SessionStorage.synthesisBackend)
     var localTtsSettings by mutableStateOf(SessionStorage.localTtsSettings)
@@ -229,15 +234,16 @@ class MainViewModel(
 
     fun dismissFolderIdDialog() {
         dialogs.showFolderIdDialog = false
-        pendingMarkupChapterIds = null
+        pendingAutoMarkupWork = null
     }
 
     fun onFolderIdSaved(folderId: String) {
         TokenStorage.folderId = folderId
         dialogs.showFolderIdDialog = false
-        val ids = pendingMarkupChapterIds ?: listOf(library.currentChapterId)
-        pendingMarkupChapterIds = null
-        executeAutoMarkupForChapters(ids)
+        val (ids, mode) = pendingAutoMarkupWork
+            ?: (listOf(library.currentChapterId) to AutoMarkupMode.FillMissing)
+        pendingAutoMarkupWork = null
+        executeAutoMarkupForChapters(ids, mode)
     }
 
     fun ensureVoiceMappings(voices: Set<String>) = editor.ensureVoiceMappings(voices)
@@ -714,30 +720,33 @@ class MainViewModel(
 
     // ── Auto-markup ───────────────────────────────────────────────────────────
 
-    fun launchAutoMarkup() {
-        launchAutoMarkupForChapters(listOf(library.currentChapterId))
+    fun launchAutoMarkup(mode: AutoMarkupMode) {
+        launchAutoMarkupForChapters(listOf(library.currentChapterId), mode)
     }
 
-    fun launchAutoMarkupForChapters(chapterIds: List<String>) {
+    fun launchAutoMarkupForChapters(
+        chapterIds: List<String>,
+        mode: AutoMarkupMode = AutoMarkupMode.FillMissing,
+    ) {
         val distinct = chapterIds.distinct().filter { id ->
             SessionStorage.getChapterText(id).isNotBlank()
         }
         if (distinct.isEmpty() || isLoading) return
         val llmConfig = TokenStorage.llmConfig
         if (llmConfig.isConfigured) {
-            launchAutoMarkupWithLlm(llmConfig, distinct)
+            launchAutoMarkupWithLlm(llmConfig, distinct, mode)
             return
         }
 
         if (TokenStorage.folderId.isBlank()) {
-            pendingMarkupChapterIds = distinct
+            pendingAutoMarkupWork = distinct to mode
             dialogs.showFolderIdDialog = true
             return
         }
-        executeAutoMarkupForChapters(distinct)
+        executeAutoMarkupForChapters(distinct, mode)
     }
 
-    private fun executeAutoMarkupForChapters(chapterIds: List<String>) {
+    private fun executeAutoMarkupForChapters(chapterIds: List<String>, mode: AutoMarkupMode) {
         if (chapterIds.isEmpty() || isLoading) return
         markupProgressJob?.cancel()
         isLoading = true
@@ -748,33 +757,20 @@ class MainViewModel(
             try {
                 saveCurrentChapter()
                 val errors = mutableListOf<String>()
-                val folderId = TokenStorage.folderId
+                val voicesAcc = SessionStorage.voiceMapping.keys.toMutableSet()
                 for ((index, id) in chapterIds.withIndex()) {
                     val raw = SessionStorage.getChapterText(id)
                     if (raw.isBlank()) continue
                     try {
-                        AiMarkupApi.autoMarkup(
-                            text = raw,
-                            token = TokenStorage.iamToken,
-                            folderId = folderId,
-                            existingVoices = editor.voiceMapping.keys.toSet(),
-                        ).collectLatest { result ->
-                            when (result) {
-                                is MarkupResult.InProgress ->
-                                    progressMessage =
-                                        "Авто-разметка ${index + 1} из ${chapterIds.size}\n${result.message}"
-                                is MarkupResult.Done -> {
-                                    SessionStorage.setOriginalText(id, raw)
-                                    SessionStorage.setChapterText(id, result.text)
-                                    if (id == library.currentChapterId) {
-                                        editor.originalText = raw
-                                        editor.text = result.text
-                                        editor.markupModeEnabled = true
-                                        editor.revalidate()
-                                    }
-                                }
-                            }
-                        }
+                        runIncrementalMarkupChapter(
+                            chapterId = id,
+                            mode = mode,
+                            chapterIndex = index,
+                            totalChapters = chapterIds.size,
+                            errors = errors,
+                            voicesAcc = voicesAcc,
+                            llmConfig = null,
+                        )
                     } catch (e: CancellationException) {
                         throw e
                     } catch (e: Exception) {
@@ -788,7 +784,7 @@ class MainViewModel(
                     errors.isEmpty() ->
                         "Авто-разметка: готово (${chapterIds.size} ${chapterWord(chapterIds.size)})"
                     else ->
-                        "Авто-разметка: есть ошибки (${errors.size})\n${errors.joinToString("\n")}"
+                        "Авто-разметка: частично или с ошибками (${errors.size})\n${errors.joinToString("\n")}"
                 }
             } catch (e: CancellationException) {
                 statusMessage = "Авто-разметка отменена"
@@ -812,7 +808,7 @@ class MainViewModel(
             else -> "глав"
         }
 
-    private fun launchAutoMarkupWithLlm(config: LlmConfig, chapterIds: List<String>) {
+    private fun launchAutoMarkupWithLlm(config: LlmConfig, chapterIds: List<String>, mode: AutoMarkupMode) {
         if (chapterIds.isEmpty() || isLoading) return
         markupProgressJob?.cancel()
         isLoading = true
@@ -823,32 +819,20 @@ class MainViewModel(
             try {
                 saveCurrentChapter()
                 val errors = mutableListOf<String>()
-                val existingVoices = editor.voiceMapping.keys.toSet()
+                val voicesAcc = SessionStorage.voiceMapping.keys.toMutableSet()
                 for ((index, id) in chapterIds.withIndex()) {
                     val raw = SessionStorage.getChapterText(id)
                     if (raw.isBlank()) continue
                     try {
-                        OpenAiMarkupApi.autoMarkup(
-                            text = raw,
-                            config = config,
-                            existingVoices = existingVoices,
-                        ).collectLatest { result ->
-                            when (result) {
-                                is MarkupResult.InProgress ->
-                                    progressMessage =
-                                        "Авто-разметка ${index + 1} из ${chapterIds.size}\n${result.message}"
-                                is MarkupResult.Done -> {
-                                    SessionStorage.setOriginalText(id, raw)
-                                    SessionStorage.setChapterText(id, result.text)
-                                    if (id == library.currentChapterId) {
-                                        editor.originalText = raw
-                                        editor.text = result.text
-                                        editor.markupModeEnabled = true
-                                        editor.revalidate()
-                                    }
-                                }
-                            }
-                        }
+                        runIncrementalMarkupChapter(
+                            chapterId = id,
+                            mode = mode,
+                            chapterIndex = index,
+                            totalChapters = chapterIds.size,
+                            errors = errors,
+                            voicesAcc = voicesAcc,
+                            llmConfig = config,
+                        )
                     } catch (e: CancellationException) {
                         throw e
                     } catch (e: Exception) {
@@ -862,7 +846,7 @@ class MainViewModel(
                     errors.isEmpty() ->
                         "Авто-разметка: готово (${chapterIds.size} ${chapterWord(chapterIds.size)}) (${config.model})"
                     else ->
-                        "Авто-разметка: есть ошибки (${errors.size})\n${errors.joinToString("\n")}"
+                        "Авто-разметка: частично или с ошибками (${errors.size})\n${errors.joinToString("\n")}"
                 }
             } catch (e: CancellationException) {
                 statusMessage = "Авто-разметка отменена"
@@ -877,6 +861,114 @@ class MainViewModel(
                 markupProgressJob = null
             }
         }
+    }
+
+    private suspend fun runIncrementalMarkupChapter(
+        chapterId: String,
+        mode: AutoMarkupMode,
+        chapterIndex: Int,
+        totalChapters: Int,
+        errors: MutableList<String>,
+        voicesAcc: MutableSet<String>,
+        llmConfig: LlmConfig?,
+    ) {
+        yield()
+        val rows = AutoMarkupParagraphPlanner.rowsOrSingleFallback(
+            SessionStorage.listChapterParagraphs(chapterId),
+            SessionStorage.getOriginalText(chapterId),
+            SessionStorage.getChapterText(chapterId),
+        )
+        if (rows.isEmpty()) return
+        val originals = rows.map { it.originalText }
+        val working = rows.map { it.markedText }.toMutableList()
+        val indices = AutoMarkupParagraphPlanner.paragraphIndicesToProcess(mode, rows)
+        if (indices.isEmpty()) return
+
+        val chunkLimit = llmConfig?.markupChunkChars ?: AiMarkupApi.DEFAULT_YANDEX_MARKUP_CHUNK_CHARS
+        val token = TokenStorage.iamToken
+        val folderId = TokenStorage.folderId
+
+        for ((pi, i) in indices.withIndex()) {
+            yield()
+            val sourceFull = AutoMarkupParagraphPlanner.sourceTextForAi(originals[i], working[i], mode)
+            if (sourceFull.isBlank()) continue
+            val fingerprintHex = AutoMarkupFingerprint.sha256Hex(sourceFull)
+            val chunks = AutoMarkupParagraphPlanner.splitParagraphChunks(sourceFull, chunkLimit)
+            val subResults = mutableListOf<String>()
+            var fail: Exception? = null
+            for ((ci, chunk) in chunks.withIndex()) {
+                yield()
+                progressMessage = buildString {
+                    append("Авто-разметка · глава ")
+                    append(chapterIndex + 1)
+                    append("/")
+                    append(totalChapters)
+                    append(" · абзац ")
+                    append(pi + 1)
+                    append("/")
+                    append(indices.size)
+                    if (chunks.size > 1) {
+                        append(" · часть ")
+                        append(ci + 1)
+                        append("/")
+                        append(chunks.size)
+                    }
+                }
+                val systemPrompt = MarkupSystemPrompts.autoMarkupPrompt(voicesAcc)
+                try {
+                    val marked = if (llmConfig != null) {
+                        OpenAiMarkupApi.markupChunkForPrompt(chunk, llmConfig, systemPrompt)
+                    } else {
+                        AiMarkupApi.markupChunkForPrompt(chunk, token, folderId, systemPrompt)
+                    }
+                    subResults.add(marked)
+                    voicesAcc.addAll(TextParser.extractVoiceNames(marked))
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    fail = e
+                    break
+                }
+            }
+            if (fail != null) {
+                val label = library.chapters.find { it.id == chapterId }?.name ?: chapterId
+                errors.add("$label, абз. ${i + 1}: ${fail.message}")
+                continue
+            }
+            working[i] = subResults.joinToString(" ").trim()
+            val pairs = originals.zip(working) { o, m -> o to m }
+            SessionStorage.replaceAllParagraphsForChapter(chapterId, pairs)
+            SessionStorage.saveAutoMarkupSourceFingerprint(chapterId, rows[i].ordinal, fingerprintHex)
+            mergeDiscoveredVoicesIntoBook(voicesAcc)
+            applyChapterMarkupToEditorIfCurrent(chapterId, originals, working, voicesAcc)
+        }
+    }
+
+    private fun mergeDiscoveredVoicesIntoBook(voicesAcc: Set<String>) {
+        val cur = SessionStorage.voiceMapping.toMutableMap()
+        var changed = false
+        for (v in voicesAcc) {
+            if (v !in cur) {
+                cur[v] = VoiceSettings()
+                changed = true
+            }
+        }
+        if (changed) SessionStorage.voiceMapping = cur
+    }
+
+    private fun applyChapterMarkupToEditorIfCurrent(
+        chapterId: String,
+        originals: List<String>,
+        working: List<String>,
+        voicesAcc: Set<String>,
+    ) {
+        if (chapterId != library.currentChapterId) return
+        editor.text = TextParser.joinParagraphsForStorage(working)
+        editor.originalText = TextParser.joinParagraphsForStorage(originals)
+        editor.markupModeEnabled = true
+        editor.ensureVoiceMappings(voicesAcc)
+        editor.saveVoiceMapping()
+        editor.revalidate()
     }
 
     fun remarkupSegment(index: Int) {

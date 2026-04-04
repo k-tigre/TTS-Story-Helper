@@ -15,9 +15,9 @@ class AppDialogState {
     var showLoadBookDialog by mutableStateOf(false)
     var showFolderIdDialog by mutableStateOf(false)
     var showResetMarkupDialog by mutableStateOf(false)
-    /** Подтверждение переразметки: null — текущая глава из главного экрана; не null — список глав (пакет). */
-    var showAutoMarkupRemarkingDialog by mutableStateOf(false)
-    var autoMarkupRemarkingPendingChapterIds by mutableStateOf<List<String>?>(null)
+    /** Выбор режима авто-разметки: null — текущая глава с панели; иначе id глав (пакет). */
+    var showAutoMarkupModeDialog by mutableStateOf(false)
+    var autoMarkupModeDialogChapterIds by mutableStateOf<List<String>?>(null)
     var showHelpDialog by mutableStateOf(false)
     var showChaptersWorkflowDialog by mutableStateOf(false)
     var showAudiobookExportBlockedDialog by mutableStateOf(false)
