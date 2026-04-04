@@ -55,6 +55,13 @@ class MainViewModel(
 
     private var pendingAutoMarkupWork: Pair<List<String>, AutoMarkupMode>? = null
 
+    /** Индексы абзацев (как в [TextParser.splitParagraphsForStorage]), где пакетная модель не сопоставилась с ответом. */
+    private var remarkupNeededParagraphs by mutableStateOf<Map<String, Set<Int>>>(emptyMap())
+
+    /** Для текущей главы: абзацы, которые можно переразметить вручную после сбоя сопоставления батча. */
+    val remarkupNeededParagraphIndices: Set<Int>
+        get() = remarkupNeededParagraphs[library.currentChapterId].orEmpty()
+
     var synthesisBackend by mutableStateOf(SessionStorage.synthesisBackend)
     var localTtsSettings by mutableStateOf(SessionStorage.localTtsSettings)
 
@@ -164,6 +171,26 @@ class MainViewModel(
 
     fun cancelMarkupProgress() {
         markupProgressJob?.cancel()
+    }
+
+    private fun addRemarkupNeeded(chapterId: String, indices: Collection<Int>) {
+        if (indices.isEmpty()) return
+        val cur = remarkupNeededParagraphs[chapterId].orEmpty()
+        remarkupNeededParagraphs = remarkupNeededParagraphs + (chapterId to (cur + indices))
+    }
+
+    private fun removeRemarkupNeeded(chapterId: String, indices: Collection<Int>) {
+        if (indices.isEmpty()) return
+        val cur = remarkupNeededParagraphs[chapterId].orEmpty() - indices.toSet()
+        remarkupNeededParagraphs =
+            if (cur.isEmpty()) remarkupNeededParagraphs - chapterId
+            else remarkupNeededParagraphs + (chapterId to cur)
+    }
+
+    private fun clearRemarkupNeededForChapter(chapterId: String) {
+        if (chapterId in remarkupNeededParagraphs) {
+            remarkupNeededParagraphs = remarkupNeededParagraphs - chapterId
+        }
     }
 
     fun saveCurrentChapter() = library.saveCurrentChapter()
@@ -965,6 +992,7 @@ class MainViewModel(
         progress: AutoMarkupProgressTracker?,
     ) {
         yield()
+        clearRemarkupNeededForChapter(chapterId)
         val rows = AutoMarkupParagraphPlanner.rowsOrSingleFallback(
             SessionStorage.listChapterParagraphs(chapterId),
             SessionStorage.getOriginalText(chapterId),
@@ -1006,6 +1034,7 @@ class MainViewModel(
             for ((paraIdx, fp) in fingerprints) {
                 SessionStorage.saveAutoMarkupSourceFingerprint(chapterId, rows[paraIdx].ordinal, fp)
             }
+            removeRemarkupNeeded(chapterId, fingerprints.map { it.first })
             mergeDiscoveredVoicesIntoBook(voicesAcc)
             applyChapterMarkupToEditorIfCurrent(chapterId, originals, working, voicesAcc)
             progress?.apply {
@@ -1077,33 +1106,13 @@ class MainViewModel(
                     }
                     persistAfterBatch(fingerprints, packDetail)
                 } else {
-                    for (k in batch.indices) {
-                        val i = batch[k]
-                        val src = sources[k]
-                        if (src.isBlank()) continue
-                        val fp = fingerprints[k].second
-                        val fb = "$packDetail · абз. ${i + 1} (отдельно)"
-                        progressMessage = progress?.formatLine(chapterIndex, fb) ?: fb
-                        if (src.length <= chunkLimit) {
-                            try {
-                                val onePrompt = MarkupSystemPrompts.autoMarkupPrompt(voicesAcc)
-                                val one = callMarkupChunk(src, onePrompt, fb)
-                                voicesAcc.addAll(TextParser.extractVoiceNames(one))
-                                working[i] = one.trim()
-                                persistAfterBatch(listOf(i to fp), fb)
-                            } catch (e: CancellationException) {
-                                throw e
-                            } catch (e: Exception) {
-                                val label = library.chapters.find { it.id == chapterId }?.name ?: chapterId
-                                errors.add("$label, абз. ${i + 1}: ${e.message}")
-                            }
-                        } else {
-                            trySingleParagraphSubchunks(i, src, fp, fb)?.let { e ->
-                                val label = library.chapters.find { it.id == chapterId }?.name ?: chapterId
-                                errors.add("$label, абз. ${i + 1}: ${e.message}")
-                            }
-                        }
-                    }
+                    val label = library.chapters.find { it.id == chapterId }?.name ?: chapterId
+                    val nums = batch.map { it + 1 }.sorted().joinToString(", ")
+                    errors.add(
+                        "$label, $packDetail: ответ модели не сопоставился с абзацами $nums. " +
+                            "Абзацы подсвечены — переразметьте их отдельно (режим по абзацам или повтор авторазметки).",
+                    )
+                    addRemarkupNeeded(chapterId, batch)
                 }
             } catch (e: CancellationException) {
                 throw e
@@ -1168,6 +1177,90 @@ class MainViewModel(
         editor.ensureVoiceMappings(voicesAcc)
         editor.saveVoiceMapping()
         editor.revalidate()
+    }
+
+    /**
+     * Переразметка одного абзаца главы (тот же путь, что и авторазметка по частям), после сбоя сопоставления батча.
+     * [paragraphIndex] — 0-based, как строки в редакторе / [TextParser.splitParagraphsForStorage].
+     */
+    fun remarkupChapterParagraph(paragraphIndex: Int) {
+        if (isLoading) return
+        val chapterId = library.currentChapterId
+        val llmConfig = TokenStorage.llmConfig
+        val config = llmConfig.takeIf { it.isConfigured }
+        if (config == null && TokenStorage.folderId.isBlank()) {
+            dialogs.showFolderIdDialog = true
+            return
+        }
+        markupProgressJob?.cancel()
+        isLoading = true
+        progressCancellable = true
+        progressMessage = "Переразметка абзаца ${paragraphIndex + 1}..."
+        markupProgressJob = scope.launch {
+            try {
+                val rows = AutoMarkupParagraphPlanner.rowsOrSingleFallback(
+                    SessionStorage.listChapterParagraphs(chapterId),
+                    SessionStorage.getOriginalText(chapterId),
+                    SessionStorage.getChapterText(chapterId),
+                )
+                if (paragraphIndex !in rows.indices) {
+                    statusMessage = "Абзац не найден"
+                    return@launch
+                }
+                val originals = rows.map { it.originalText }
+                val working = rows.map { it.markedText }.toMutableList()
+                val mode = AutoMarkupMode.FullRemark
+                val i = paragraphIndex
+                val sourceFull = AutoMarkupParagraphPlanner.sourceTextForAi(originals[i], working[i], mode).trim()
+                if (sourceFull.isBlank()) {
+                    statusMessage = "Нет текста для разметки"
+                    return@launch
+                }
+                val chunkLimit = config?.markupChunkChars ?: AiMarkupApi.DEFAULT_YANDEX_MARKUP_CHUNK_CHARS
+                val token = TokenStorage.iamToken
+                val folderId = TokenStorage.folderId
+                val voicesAcc = SessionStorage.voiceMapping.keys.toMutableSet()
+                val chunks =
+                    if (sourceFull.length <= chunkLimit) listOf(sourceFull)
+                    else AutoMarkupParagraphPlanner.splitParagraphChunks(sourceFull, chunkLimit)
+                val subResults = mutableListOf<String>()
+                for ((ci, chunk) in chunks.withIndex()) {
+                    yield()
+                    val partDetail =
+                        if (chunks.size > 1) "абз. ${i + 1}, часть ${ci + 1}/${chunks.size}" else "абз. ${i + 1}"
+                    progressMessage = partDetail
+                    val systemPrompt = MarkupSystemPrompts.autoMarkupPrompt(voicesAcc)
+                    val marked = if (config != null) {
+                        OpenAiMarkupApi.markupChunkForPrompt(chunk, config, systemPrompt)
+                    } else {
+                        AiMarkupApi.markupChunkForPrompt(chunk, token, folderId, systemPrompt)
+                    }
+                    subResults.add(marked)
+                    voicesAcc.addAll(TextParser.extractVoiceNames(marked))
+                }
+                working[i] = subResults.joinToString(" ").trim()
+                val fp = AutoMarkupFingerprint.sha256Hex(sourceFull)
+                val pairs = originals.zip(working) { o, m -> o to m }
+                SessionStorage.replaceAllParagraphsForChapter(chapterId, pairs)
+                SessionStorage.saveAutoMarkupSourceFingerprint(chapterId, rows[i].ordinal, fp)
+                removeRemarkupNeeded(chapterId, setOf(i))
+                mergeDiscoveredVoicesIntoBook(voicesAcc)
+                applyChapterMarkupToEditorIfCurrent(chapterId, originals, working, voicesAcc)
+                library.refreshChapters()
+                statusMessage = "Абзац ${paragraphIndex + 1} переразмечен"
+            } catch (e: CancellationException) {
+                statusMessage = "Переразметка отменена"
+                throw e
+            } catch (e: Exception) {
+                statusMessage = "Ошибка переразметки абзаца: ${e.message}"
+                e.printStackTrace()
+            } finally {
+                progressCancellable = false
+                isLoading = false
+                progressMessage = ""
+                markupProgressJob = null
+            }
+        }
     }
 
     fun remarkupSegment(index: Int) {

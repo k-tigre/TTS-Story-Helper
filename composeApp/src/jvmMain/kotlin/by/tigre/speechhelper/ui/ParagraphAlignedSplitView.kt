@@ -1,5 +1,6 @@
 package by.tigre.speechhelper.ui
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -69,6 +70,9 @@ fun ParagraphAlignedSplitView(
     onMergeWithPrevious: (Int) -> Unit,
     onMergeWithNext: (Int) -> Unit,
     onRemarkupSegment: (Int) -> Unit,
+    /** Индексы абзацев (1-я колонка), где батч авторазметки не сопоставился с ответом модели. */
+    remarkupParagraphIndices: Set<Int> = emptySet(),
+    onRemarkupParagraph: (Int) -> Unit = {},
     onChangeSegmentVoice: (Int, String?) -> Unit,
     availableVoiceNames: List<String>,
     isLoading: Boolean,
@@ -100,6 +104,7 @@ fun ParagraphAlignedSplitView(
 
     val outlineColor = MaterialTheme.colorScheme.outline
     val labelStyle = MaterialTheme.typography.labelMedium
+    val remarkupBg = Color(0xFFFF9800).copy(alpha = 0.14f)
     val unmatched = validationResult?.unmatchedSegmentIndices.orEmpty()
 
     fun segmentIndicesForParagraph(paraIndex: Int, paraCount: Int): List<Int> {
@@ -170,32 +175,64 @@ fun ParagraphAlignedSplitView(
                 val (paraIndex, paraText) = showRows[rowIdx]
                 val paraCount = if (paraDrafts.isNotEmpty()) paraDrafts.size else 1
                 val segIdxs = segmentIndicesForParagraph(paraIndex, paraCount)
+                val needsParagraphRemarkup = paraIndex in remarkupParagraphIndices
 
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
-                    OutlinedTextField(
-                        value = if (paraDrafts.isNotEmpty()) paraDrafts.getOrElse(paraIndex) { "" } else paraText,
-                        onValueChange = { new ->
-                            if (paraDrafts.isEmpty()) {
-                                val next = if (new.isBlank()) emptyList() else listOf(new)
-                                paraDrafts = next
-                                onOriginalTextChange(TextParser.joinParagraphsForStorage(next))
-                            } else {
-                                val next = paraDrafts.toMutableList()
-                                if (paraIndex < next.size) {
-                                    next[paraIndex] = new
-                                    paraDrafts = next
-                                    onOriginalTextChange(TextParser.joinParagraphsForStorage(next))
+                    Column(
+                        modifier = Modifier
+                            .weight(1f)
+                            .background(
+                                if (needsParagraphRemarkup) remarkupBg else Color.Transparent,
+                                RoundedCornerShape(8.dp),
+                            )
+                            .padding(4.dp),
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text(
+                                "Абзац ${paraIndex + 1}",
+                                style = labelStyle,
+                                modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp),
+                            )
+                            if (needsParagraphRemarkup) {
+                                OutlinedButton(
+                                    onClick = { onRemarkupParagraph(paraIndex) },
+                                    enabled = !isLoading,
+                                    modifier = Modifier.height(28.dp),
+                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+                                ) {
+                                    Text("Переразметить абзац", style = labelStyle)
                                 }
                             }
-                        },
-                        modifier = Modifier.weight(1f),
-                        minLines = 3,
-                        textStyle = MaterialTheme.typography.bodyMedium,
-                        label = { Text("Абзац ${paraIndex + 1}", style = labelStyle) },
-                    )
+                        }
+                        OutlinedTextField(
+                            value = if (paraDrafts.isNotEmpty()) paraDrafts.getOrElse(paraIndex) { "" } else paraText,
+                            onValueChange = { new ->
+                                if (paraDrafts.isEmpty()) {
+                                    val next = if (new.isBlank()) emptyList() else listOf(new)
+                                    paraDrafts = next
+                                    onOriginalTextChange(TextParser.joinParagraphsForStorage(next))
+                                } else {
+                                    val next = paraDrafts.toMutableList()
+                                    if (paraIndex < next.size) {
+                                        next[paraIndex] = new
+                                        paraDrafts = next
+                                        onOriginalTextChange(TextParser.joinParagraphsForStorage(next))
+                                    }
+                                }
+                            },
+                            modifier = Modifier.fillMaxWidth().padding(top = 2.dp),
+                            minLines = 3,
+                            textStyle = MaterialTheme.typography.bodyMedium,
+                            label = null,
+                        )
+                    }
 
                     Column(
                         modifier = Modifier.weight(1f),
