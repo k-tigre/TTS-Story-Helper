@@ -122,6 +122,19 @@ object TextParser {
 
     private val PAUSE_REGEX = Regex("""<\[[^\]]*\]>""")
 
+    /** SSML-паузы для SpeechKit (`<[small]>`, …) — не часть литературного оригинала. */
+    fun stripPauseTags(text: String): String = PAUSE_REGEX.replace(text, "")
+
+    /**
+     * Собирает текст «исходника» из разобранных сегментов: убирает паузы и пустые куски,
+     * сохраняет переводы строк внутри сегментов (в отличие от [stripMarkup] на целой главе).
+     */
+    fun joinSegmentTextsAsPlainOriginal(segments: List<TextSegment>): String =
+        segments
+            .map { stripPauseTags(it.text).trim() }
+            .filter { it.isNotBlank() }
+            .joinToString("\n\n")
+
     fun stripMarkup(text: String): String {
         var result = TAG_REGEX.replace(text) { it.groupValues[2] }
         result = PAUSE_REGEX.replace(result, "")

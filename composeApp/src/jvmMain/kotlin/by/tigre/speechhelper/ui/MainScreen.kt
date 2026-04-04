@@ -81,6 +81,8 @@ import by.tigre.speechhelper.domain.AutoMarkupMode
 import by.tigre.speechhelper.domain.LOCAL_TTS_SAMPLE_RATES
 import by.tigre.speechhelper.domain.SynthesisBackend
 import by.tigre.speechhelper.domain.ParagraphMapping
+import by.tigre.speechhelper.domain.ParagraphReadiness
+import by.tigre.speechhelper.domain.ParagraphReadinessLabel
 import by.tigre.speechhelper.domain.TextParser
 import by.tigre.speechhelper.domain.TextSegment
 import by.tigre.speechhelper.domain.ValidationResult
@@ -239,14 +241,16 @@ fun MainScreen() {
                 } else {
                     val splitOriginal = remember(vm.originalText, vm.text) {
                         vm.originalText.ifBlank {
-                            TextParser.parse(vm.text).joinToString("\n\n") { it.text }
+                            TextParser.joinSegmentTextsAsPlainOriginal(TextParser.parse(vm.text))
                         }
                     }
+                    val markedParagraphs = remember(vm.text) { TextParser.splitParagraphsForStorage(vm.text) }
                     Column(modifier = Modifier.weight(1f).fillMaxHeight()) {
                         when (vm.viewMode) {
                             0 -> MarkupSplitView(
                                 originalText = splitOriginal,
                                 markupText = vm.text,
+                                markedParagraphs = markedParagraphs,
                                 onMarkupTextChange = { newText -> vm.applyMarkupTextChange(newText) },
                                 onOriginalTextChange = { newOriginal ->
                                     vm.updateOriginalText(newOriginal)
@@ -283,6 +287,7 @@ fun MainScreen() {
                                 availableVoiceNames = vm.voiceMapping.keys.toList().sorted(),
                                 isLoading = vm.isLoading,
                                 onRevalidate = { vm.revalidate() },
+                                markedParagraphs = markedParagraphs,
                                 modifier = Modifier.weight(1f).fillMaxWidth(),
                             )
                         }
@@ -643,6 +648,69 @@ private fun MarkupSyncedScrollColumn(
 
 private val remarkupParagraphHighlightColor = Color(0xFFFF9800).copy(alpha = 0.2f)
 
+private val paragraphNoVoiceBg = Color(0xFF2196F3).copy(alpha = 0.12f)
+private val paragraphReadyBg = Color(0xFF4CAF50).copy(alpha = 0.10f)
+private val paragraphInvalidParaBg = Color(0xFFFF9800).copy(alpha = 0.14f)
+private val paragraphUnvalidatedBg = Color(0xFF9E9E9E).copy(alpha = 0.10f)
+
+private fun applyParagraphReadinessHighlights(
+    base: AnnotatedString,
+    plainOriginal: String,
+    markedParagraphs: List<String>,
+    validationResult: ValidationResult?,
+    remarkupIndices: Set<Int>,
+): AnnotatedString {
+    val origParas = TextParser.splitParagraphsForStorage(plainOriginal)
+    val ranges = paragraphStorageNonBlankRangesForHighlight(plainOriginal)
+    if (origParas.isEmpty() || ranges.isEmpty() || origParas.size != ranges.size) return base
+
+    val b = AnnotatedString.Builder(base)
+    for (i in origParas.indices) {
+        val r = ranges[i]
+        if (r.isEmpty() || i in remarkupIndices) continue
+        val kind = ParagraphReadiness.classify(
+            origParas[i],
+            markedParagraphs.getOrElse(i) { "" },
+            validationResult?.paragraphs?.getOrNull(i),
+            remarkupNeeded = false,
+        )
+        val color = when (kind) {
+            ParagraphReadinessLabel.NoVoiceTags -> paragraphNoVoiceBg
+            ParagraphReadinessLabel.MarkedValid -> paragraphReadyBg
+            ParagraphReadinessLabel.MarkedInvalid -> paragraphInvalidParaBg
+            ParagraphReadinessLabel.MarkedUnvalidated -> paragraphUnvalidatedBg
+            else -> null
+        }
+        if (color != null) {
+            b.addStyle(SpanStyle(background = color), r.first, r.last + 1)
+        }
+    }
+    return b.toAnnotatedString()
+}
+
+private fun annotateOriginalForMarkupView(
+    plainOriginal: String,
+    validationResult: ValidationResult?,
+    remarkupParagraphIndices: Set<Int>,
+    markedParagraphs: List<String>,
+    focused: Boolean,
+): AnnotatedString {
+    if (focused) return AnnotatedString(plainOriginal)
+    val validated = buildValidatedOriginalAnnotatedExact(plainOriginal, validationResult)
+    val withReadiness = applyParagraphReadinessHighlights(
+        validated,
+        plainOriginal,
+        markedParagraphs,
+        validationResult,
+        remarkupParagraphIndices,
+    )
+    return applyRemarkupParagraphHighlights(
+        withReadiness,
+        plainOriginal,
+        remarkupParagraphIndices,
+    )
+}
+
 /** Диапазоны символов непустых абзацев в тексте хранения (`\\n\\n`), в том же порядке, что [TextParser.splitParagraphsForStorage]. */
 private fun paragraphStorageNonBlankRangesForHighlight(full: String): List<IntRange> {
     if (full.isBlank()) return emptyList()
@@ -687,6 +755,7 @@ private fun applyRemarkupParagraphHighlights(
 private fun MarkupSplitView(
     originalText: String,
     markupText: String,
+    markedParagraphs: List<String>,
     onMarkupTextChange: (String) -> Unit,
     onOriginalTextChange: (String) -> Unit,
     validationResult: ValidationResult?,
@@ -764,6 +833,14 @@ private fun MarkupSplitView(
             )
             HorizontalDivider()
         }
+        Text(
+            "Абзацы в «Исходный текст»: зелёный фон — разметка валидна; синий — нет тегов [voice] " +
+                "(режим «Недостающие» берёт такие абзацы по порядку в тексте, с меньшего номера); оранжевый фон абзаца — ошибка «Проверить».",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+        )
+        HorizontalDivider()
 
         // Content: two scrollable columns side by side
         val leftScrollState = rememberScrollState()
@@ -850,24 +927,24 @@ private fun MarkupSplitView(
         var originalFieldValue by remember {
             mutableStateOf(
                 TextFieldValue(
-                    applyRemarkupParagraphHighlights(
-                        buildValidatedOriginalAnnotatedExact(originalText, validationResult),
+                    annotateOriginalForMarkupView(
                         originalText,
+                        validationResult,
                         remarkupParagraphIndices,
+                        markedParagraphs,
+                        focused = false,
                     ),
                 ),
             )
         }
-        LaunchedEffect(originalText, validationResult, originalFieldHasFocus, remarkupParagraphIndices) {
-            val ann = if (originalFieldHasFocus) {
-                AnnotatedString(originalText)
-            } else {
-                applyRemarkupParagraphHighlights(
-                    buildValidatedOriginalAnnotatedExact(originalText, validationResult),
-                    originalText,
-                    remarkupParagraphIndices,
-                )
-            }
+        LaunchedEffect(originalText, validationResult, originalFieldHasFocus, remarkupParagraphIndices, markedParagraphs) {
+            val ann = annotateOriginalForMarkupView(
+                originalText,
+                validationResult,
+                remarkupParagraphIndices,
+                markedParagraphs,
+                originalFieldHasFocus,
+            )
             if (originalFieldValue.text != originalText) {
                 originalFieldValue = TextFieldValue(ann, TextRange(originalText.length))
             } else {
@@ -912,15 +989,13 @@ private fun MarkupSplitView(
                                 onValueChange = { newValue ->
                                     val textChanged = newValue.text != originalFieldValue.text
                                     val plain = newValue.text
-                                    val ann = if (originalFieldHasFocus) {
-                                        AnnotatedString(plain)
-                                    } else {
-                                        applyRemarkupParagraphHighlights(
-                                            buildValidatedOriginalAnnotatedExact(plain, validationResult),
-                                            plain,
-                                            remarkupParagraphIndices,
-                                        )
-                                    }
+                                    val ann = annotateOriginalForMarkupView(
+                                        plain,
+                                        validationResult,
+                                        remarkupParagraphIndices,
+                                        markedParagraphs,
+                                        originalFieldHasFocus,
+                                    )
                                     originalFieldValue = TextFieldValue(
                                         annotatedString = ann,
                                         selection = newValue.selection,
@@ -938,18 +1013,13 @@ private fun MarkupSplitView(
                                     .onPreviewKeyEvent { event ->
                                         handleEditorKeys(event, originalFieldValue) { newValue ->
                                             val changed = newValue.text != originalFieldValue.text
-                                            val ann = if (originalFieldHasFocus) {
-                                                AnnotatedString(newValue.text)
-                                            } else {
-                                                applyRemarkupParagraphHighlights(
-                                                    buildValidatedOriginalAnnotatedExact(
-                                                        newValue.text,
-                                                        validationResult,
-                                                    ),
-                                                    newValue.text,
-                                                    remarkupParagraphIndices,
-                                                )
-                                            }
+                                            val ann = annotateOriginalForMarkupView(
+                                                newValue.text,
+                                                validationResult,
+                                                remarkupParagraphIndices,
+                                                markedParagraphs,
+                                                originalFieldHasFocus,
+                                            )
                                             originalFieldValue = TextFieldValue(
                                                 annotatedString = ann,
                                                 selection = newValue.selection,
@@ -980,10 +1050,12 @@ private fun MarkupSplitView(
                     ) {
                         Column(modifier = Modifier.fillMaxWidth()) {
                             Text(
-                                text = applyRemarkupParagraphHighlights(
-                                    buildValidatedOriginalAnnotatedExact(originalText, validationResult),
+                                text = annotateOriginalForMarkupView(
                                     originalText,
+                                    validationResult,
                                     remarkupParagraphIndices,
+                                    markedParagraphs,
+                                    focused = false,
                                 ),
                                 style = bodyStyle.copy(color = onSurfaceColor),
                             )

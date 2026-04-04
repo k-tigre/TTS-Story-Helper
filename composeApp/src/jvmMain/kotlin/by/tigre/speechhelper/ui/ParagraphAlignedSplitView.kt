@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -45,6 +46,8 @@ import androidx.compose.ui.unit.dp
 import by.tigre.speechhelper.data.AudioPlayer
 import by.tigre.speechhelper.data.SynthesisResult
 import by.tigre.speechhelper.domain.API_VOICES_INFO
+import by.tigre.speechhelper.domain.ParagraphReadiness
+import by.tigre.speechhelper.domain.ParagraphReadinessLabel
 import by.tigre.speechhelper.domain.TextParser
 import by.tigre.speechhelper.domain.TextSegment
 import by.tigre.speechhelper.domain.ValidationResult
@@ -77,6 +80,8 @@ fun ParagraphAlignedSplitView(
     availableVoiceNames: List<String>,
     isLoading: Boolean,
     onRevalidate: () -> Unit,
+    /** Фрагменты разметки по абзацам (как в хранилище), в том же порядке, что и [originalText]. */
+    markedParagraphs: List<String> = emptyList(),
     modifier: Modifier = Modifier,
 ) {
     val scope = rememberCoroutineScope()
@@ -131,36 +136,46 @@ fun ParagraphAlignedSplitView(
         modifier = modifier
             .border(1.dp, outlineColor, RoundedCornerShape(4.dp)),
     ) {
-        Row(
+        Column(
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(horizontal = 8.dp, vertical = 6.dp),
-            verticalAlignment = Alignment.CenterVertically,
         ) {
-            Text("Исходный текст (по абзацам)", style = labelStyle, modifier = Modifier.weight(1f))
-            if (validationResult != null) {
-                val validCount = validationResult.paragraphs.count { it.isValid }
-                val totalCount = validationResult.paragraphs.size
-                val indicatorColor = if (validationResult.isFullyValid) {
-                    Color(0xFF4CAF50)
-                } else {
-                    Color(0xFFFF9800)
-                }
-                Text(
-                    text = "$validCount/$totalCount",
-                    style = labelStyle.copy(color = indicatorColor),
-                    modifier = Modifier.padding(horizontal = 8.dp),
-                )
-            }
-            OutlinedButton(
-                onClick = onRevalidate,
-                modifier = Modifier.height(28.dp),
-                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
             ) {
-                Text("Проверить", style = labelStyle)
+                Text("Исходный текст (по абзацам)", style = labelStyle, modifier = Modifier.weight(1f))
+                if (validationResult != null) {
+                    val validCount = validationResult.paragraphs.count { it.isValid }
+                    val totalCount = validationResult.paragraphs.size
+                    val indicatorColor = if (validationResult.isFullyValid) {
+                        Color(0xFF4CAF50)
+                    } else {
+                        Color(0xFFFF9800)
+                    }
+                    Text(
+                        text = "$validCount/$totalCount",
+                        style = labelStyle.copy(color = indicatorColor),
+                        modifier = Modifier.padding(horizontal = 8.dp),
+                    )
+                }
+                OutlinedButton(
+                    onClick = onRevalidate,
+                    modifier = Modifier.height(28.dp),
+                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+                ) {
+                    Text("Проверить", style = labelStyle)
+                }
+                VerticalDivider(modifier = Modifier.height(20.dp).padding(horizontal = 4.dp))
+                Text("Сегменты разбивки", style = labelStyle, modifier = Modifier.weight(1f))
             }
-            VerticalDivider(modifier = Modifier.height(20.dp).padding(horizontal = 4.dp))
-            Text("Сегменты разбивки", style = labelStyle, modifier = Modifier.weight(1f))
+            Text(
+                "Ярлыки у абзаца: «Готово» — есть [voice] и проверка; «Без [voice]» — попадёт в «Недостающие» по порядку; «Ошибка» — после «Проверить».",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(top = 6.dp),
+            )
         }
         HorizontalDivider()
 
@@ -192,14 +207,52 @@ fun ParagraphAlignedSplitView(
                     ) {
                         Row(
                             modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
                             verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
                         ) {
                             Text(
                                 "Абзац ${paraIndex + 1}",
                                 style = labelStyle,
                                 modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp),
                             )
+                            val markedSlice = markedParagraphs.getOrNull(paraIndex) ?: ""
+                            val paraMapping = validationResult?.paragraphs?.getOrNull(paraIndex)
+                            val readiness = ParagraphReadiness.classify(
+                                paraText,
+                                markedSlice,
+                                paraMapping,
+                                needsParagraphRemarkup,
+                            )
+                            if (readiness != ParagraphReadinessLabel.Empty) {
+                                val (badgeText, badgeColor) = when (readiness) {
+                                    ParagraphReadinessLabel.RemarkupNeeded ->
+                                        "Сбой пакета" to Color(0xFFE65100)
+                                    ParagraphReadinessLabel.NoVoiceTags ->
+                                        "Без [voice]" to Color(0xFF1565C0)
+                                    ParagraphReadinessLabel.MarkedValid ->
+                                        "Готово" to Color(0xFF2E7D32)
+                                    ParagraphReadinessLabel.MarkedInvalid ->
+                                        "Ошибка" to Color(0xFFEF6C00)
+                                    ParagraphReadinessLabel.MarkedUnvalidated ->
+                                        "Нет проверки" to Color(0xFF616161)
+                                    ParagraphReadinessLabel.Empty ->
+                                        "" to Color.Transparent
+                                }
+                                if (badgeText.isNotEmpty()) {
+                                    Surface(
+                                        color = badgeColor.copy(alpha = 0.16f),
+                                        shape = RoundedCornerShape(6.dp),
+                                    ) {
+                                        Text(
+                                            badgeText,
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = badgeColor,
+                                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                                        )
+                                    }
+                                }
+                            }
+                            Spacer(modifier = Modifier.weight(1f))
                             if (needsParagraphRemarkup) {
                                 OutlinedButton(
                                     onClick = { onRemarkupParagraph(paraIndex) },

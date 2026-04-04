@@ -228,7 +228,7 @@ class EditorWorkspaceViewModel(
 
     fun resetMarkup() {
         text = if (originalText.isNotBlank()) originalText
-        else TextParser.parse(text).joinToString("\n\n") { it.text }
+        else TextParser.joinSegmentTextsAsPlainOriginal(TextParser.parse(text))
         SessionStorage.setChapterText(currentChapterId(), text)
         markupModeEnabled = true
         viewMode = 0
@@ -243,7 +243,7 @@ class EditorWorkspaceViewModel(
         segments.addAll(newSegs)
         val id = currentChapterId()
         if (originalText.isBlank() && hasMarkers) {
-            originalText = segments.joinToString("\n\n") { it.text }
+            originalText = TextParser.joinSegmentTextsAsPlainOriginal(newSegs)
             SessionStorage.setOriginalText(id, originalText)
         }
         validationResult = when {
@@ -283,7 +283,7 @@ class EditorWorkspaceViewModel(
         if (!hasMarkers) return
         val id = currentChapterId()
         if (originalText.isBlank()) {
-            originalText = text
+            originalText = TextParser.joinSegmentTextsAsPlainOriginal(TextParser.parse(text))
             SessionStorage.setOriginalText(id, originalText)
         }
         markupModeEnabled = true
@@ -295,7 +295,7 @@ class EditorWorkspaceViewModel(
         val id = currentChapterId()
         if (!textHadOriginalMarkup) {
             text = if (originalText.isNotBlank()) originalText
-            else TextParser.parse(text).joinToString("\n\n") { it.text }
+            else TextParser.joinSegmentTextsAsPlainOriginal(TextParser.parse(text))
             originalText = ""
             SessionStorage.setOriginalText(id, "")
             SessionStorage.setChapterText(id, text)
