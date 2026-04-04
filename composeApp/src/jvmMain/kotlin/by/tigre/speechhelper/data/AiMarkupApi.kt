@@ -45,7 +45,7 @@ private data class Choice(
 
 object AiMarkupApi {
     private const val ENDPOINT = "https://ai.api.cloud.yandex.net/v1/chat/completions"
-    private const val DEFAULT_CHUNK_LIMIT = 2000
+    private const val DEFAULT_CHUNK_LIMIT = 3000
 
     private val json = HttpClientProvider.jsonInstance
     private val client = HttpClientProvider.markupClient
@@ -175,7 +175,6 @@ object AiMarkupApi {
         val request = ChatRequest(
             model = model,
             messages = messages,
-            temperature = 0.5,
         )
 
         val totalChars = messages.sumOf { it.content.length }
@@ -200,7 +199,7 @@ object AiMarkupApi {
         val responseText = response.bodyAsText()
         val chatResponse = json.decodeFromString<ChatResponse>(responseText)
         val content = chatResponse.choices.firstOrNull()?.message?.content
-            ?: throw AiMarkupException("No content in AI response")
+            ?: throw AiMarkupException("No content in AI response: $responseText")
         println("[AiMarkup] <- Received ${content.length} chars")
         return content
     }
