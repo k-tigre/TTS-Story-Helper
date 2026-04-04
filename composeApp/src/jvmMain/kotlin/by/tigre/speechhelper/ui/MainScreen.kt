@@ -24,7 +24,6 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.selection.SelectionContainer
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -77,7 +76,7 @@ import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.unit.dp
 import by.tigre.speechhelper.TokenStorage
-import by.tigre.speechhelper.data.SessionStorage
+import by.tigre.speechhelper.ui.vm.RootViewModel
 import by.tigre.speechhelper.domain.LOCAL_TTS_SAMPLE_RATES
 import by.tigre.speechhelper.domain.SynthesisBackend
 import by.tigre.speechhelper.domain.ParagraphMapping
@@ -91,23 +90,15 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.distinctUntilChanged
-import kotlinx.coroutines.isActive
-import java.io.File
 
 @OptIn(ExperimentalMaterial3Api::class, FlowPreview::class)
 @Composable
 fun MainScreen() {
     val scope = rememberCoroutineScope()
-    val vm = remember(scope) { MainViewModel(scope) }
-    var showTokenDialog by remember { mutableStateOf(false) }
-
-    // Show help on first launch
-    LaunchedEffect(Unit) {
-        if (TokenStorage.isFirstLaunch) {
-            vm.showHelpDialog = true
-            TokenStorage.markFirstLaunchDone()
-        }
-    }
+    val root = remember(scope) { RootViewModel(scope) }
+    val vm = root.main
+    val dialogs = root.dialogs
+    val player = root.player
 
     // Auto-save text (debounced)
     LaunchedEffect(vm.currentChapterId) {
@@ -124,30 +115,13 @@ fun MainScreen() {
 
     // Load audio when chapter or audio path changes
     LaunchedEffect(vm.currentChapterId, vm.chapterAudioPath) {
-        vm.resetPlayerState()
-        val path = vm.chapterAudioPath
-        if (path != null && File(path).exists()) {
-            try {
-                vm.chapterPlayer.open(path) {
-                    vm.playerIsPlaying = false
-                    vm.playerPositionMs = 0L
-                }
-                vm.playerDurationMs = vm.chapterPlayer.durationMs
-                vm.playerReady = true
-            } catch (_: Exception) {
-                vm.playerReady = false
-            }
-        }
+        player.bindChapterAudioFile(vm.chapterAudioPath)
     }
 
     // Update playback position while playing
-    LaunchedEffect(vm.playerIsPlaying) {
-        if (vm.playerIsPlaying) {
-            while (isActive && vm.chapterPlayer.isPlaying) {
-                vm.playerPositionMs = vm.chapterPlayer.currentPositionMs
-                delay(200)
-            }
-            vm.playerIsPlaying = vm.chapterPlayer.isPlaying
+    LaunchedEffect(player.playerIsPlaying) {
+        if (player.playerIsPlaying) {
+            player.tickPositionWhilePlaying()
         }
     }
 
@@ -165,188 +139,7 @@ fun MainScreen() {
             .collectLatest { vm.syncSegmentsFromText() }
     }
 
-    // ── Dialogs ───────────────────────────────────────────────────────────────
-
-    if (vm.showCreateDialog) {
-        CreateChapterDialog(
-            onDismiss = { vm.showCreateDialog = false },
-            onCreate = { vm.createChapter(it) },
-        )
-    }
-
-    if (vm.showRenameDialog) {
-        val currentName = vm.chapters.find { it.id == vm.currentChapterId }?.name ?: ""
-        RenameChapterDialog(
-            currentName = currentName,
-            onDismiss = { vm.showRenameDialog = false },
-            onRename = { vm.renameCurrentChapter(it) },
-        )
-    }
-
-    if (vm.showDeleteDialog) {
-        val currentName = vm.chapters.find { it.id == vm.currentChapterId }?.name ?: ""
-        DeleteChapterDialog(
-            chapterName = currentName,
-            onDismiss = { vm.showDeleteDialog = false },
-            onDelete = { vm.deleteCurrentChapter() },
-        )
-    }
-
-    if (vm.showClearAllDialog) {
-        AlertDialog(
-            onDismissRequest = { vm.showClearAllDialog = false },
-            title = { Text("Очистить всё?") },
-            text = { Text("Все главы, настройки голосов и кэш будут удалены. Это действие нельзя отменить.") },
-            confirmButton = {
-                Button(
-                    onClick = { vm.clearAll() },
-                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
-                ) {
-                    Text("Очистить")
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { vm.showClearAllDialog = false }) { Text("Отмена") }
-            },
-        )
-    }
-
-    if (vm.showSaveBookDialog) {
-        SaveBookDialog(
-            onDismiss = { vm.showSaveBookDialog = false },
-            onSave = { vm.saveBook(it) },
-        )
-    }
-
-    if (vm.showLoadBookDialog) {
-        LoadBookDialog(
-            onDismiss = { vm.showLoadBookDialog = false },
-            onLoad = { vm.loadBook(it) },
-            onDelete = { SessionStorage.deleteBook(it) },
-        )
-    }
-
-    if (vm.showFolderIdDialog) {
-        FolderIdDialog(
-            onDismiss = { vm.dismissFolderIdDialog() },
-            onSave = { folderId -> vm.onFolderIdSaved(folderId) },
-        )
-    }
-
-    if (vm.showChaptersWorkflowDialog) {
-        ChaptersWorkflowDialog(
-            chapters = vm.chapters,
-            currentChapterId = vm.currentChapterId,
-            isLoading = vm.isLoading,
-            onDismiss = { vm.showChaptersWorkflowDialog = false },
-            onLaunchBatchMarkup = { ids ->
-                if (!TokenStorage.hasCredentials()) {
-                    showTokenDialog = true
-                } else {
-                    vm.launchAutoMarkupForChapters(ids)
-                    vm.showChaptersWorkflowDialog = false
-                }
-            },
-            onLaunchBatchSynthesis = { ids ->
-                if (vm.synthesisBackend == SynthesisBackend.Cloud && !TokenStorage.hasCredentials()) {
-                    showTokenDialog = true
-                } else {
-                    vm.launchBatchSynthesisForChapters(ids)
-                    vm.showChaptersWorkflowDialog = false
-                }
-            },
-            onSetMarkupDone = { id, done -> vm.setChapterMarkupDoneFlag(id, done) },
-            onSetVoiceDone = { id, done -> vm.setChapterVoiceDoneFlag(id, done) },
-            audioExists = { vm.audioFileExistsForChapter(it) },
-        )
-    }
-
-    if (vm.showAudiobookExportDialog) {
-        var exportSelectedIds by remember(vm.audiobookExportDialogKey) {
-            mutableStateOf(vm.defaultAudiobookExportSelection())
-        }
-        AudiobookExportDialog(
-            chapters = vm.chapters,
-            eligibilityIssues = { vm.chapterAudiobookExportEligibilityIssues(it) },
-            selectedIds = exportSelectedIds,
-            onSelectedIdsChange = { exportSelectedIds = it },
-            validationError = vm.audiobookExportValidationError,
-            onDismiss = { vm.dismissAudiobookExportDialog() },
-            onExport = { vm.submitAudiobookExport(it) },
-        )
-    }
-
-    if (showTokenDialog) {
-        TokenDialog(
-            onDismiss = { showTokenDialog = false },
-            onSave = { token ->
-                TokenStorage.iamToken = token
-                showTokenDialog = false
-            },
-            onOpenHelp = {
-                showTokenDialog = false
-                vm.showHelpDialog = true
-            },
-        )
-    }
-
-    if (vm.showHelpDialog) {
-        HelpDialog(onDismiss = { vm.showHelpDialog = false })
-    }
-
-    if (vm.showResetMarkupDialog) {
-        AlertDialog(
-            onDismissRequest = { vm.showResetMarkupDialog = false },
-            title = { Text("Сбросить разметку?") },
-            text = { Text("Все голосовые теги будут удалены. Будет оставлен только исходный текст.") },
-            confirmButton = {
-                Button(
-                    onClick = { vm.resetMarkup() },
-                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
-                ) {
-                    Text("Сбросить")
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { vm.showResetMarkupDialog = false }) { Text("Отмена") }
-            },
-        )
-    }
-
-    if (vm.showAudiobookExportBlockedDialog) {
-        val scrollState = rememberScrollState()
-        AlertDialog(
-            onDismissRequest = { vm.dismissAudiobookExportBlockedDialog() },
-            title = { Text("Аудиокнига ещё не готова") },
-            text = {
-                Column(Modifier.verticalScroll(scrollState)) {
-                    Text(
-                        "Чтобы экспортировать аудиокнигу, по каждой главе нужны: сохранённый файл озвучки и отмеченные флажки «Разметка готова» и «Озвучка готова». Сейчас не хватает:",
-                        style = MaterialTheme.typography.bodyMedium,
-                    )
-                    Spacer(modifier = Modifier.height(12.dp))
-                    vm.audiobookExportBlockedRows.forEach { (chapterName, reasons) ->
-                        val line = buildString {
-                            append("• ")
-                            if (chapterName.isNotBlank()) {
-                                append("«")
-                                append(chapterName)
-                                append("»: ")
-                            }
-                            append(reasons.joinToString("; "))
-                        }
-                        Text(line, style = MaterialTheme.typography.bodyMedium)
-                        Spacer(modifier = Modifier.height(6.dp))
-                    }
-                }
-            },
-            confirmButton = {
-                TextButton(onClick = { vm.dismissAudiobookExportBlockedDialog() }) {
-                    Text("Понятно")
-                }
-            },
-        )
-    }
+    AppGlobalOverlays(root)
 
     // ── Main layout ───────────────────────────────────────────────────────────
 
@@ -362,11 +155,11 @@ fun MainScreen() {
                             chapters = vm.chapters,
                             currentChapterId = vm.currentChapterId,
                             onSelectChapter = { vm.switchToChapter(it) },
-                            onCreateChapter = { vm.showCreateDialog = true },
-                            onRenameChapter = { vm.showRenameDialog = true },
-                            onDeleteChapter = { vm.showDeleteDialog = true },
+                            onCreateChapter = { dialogs.showCreateDialog = true },
+                            onRenameChapter = { dialogs.showRenameDialog = true },
+                            onDeleteChapter = { dialogs.showDeleteDialog = true },
                         )
-                        TextButton(onClick = { vm.showChaptersWorkflowDialog = true }) {
+                        TextButton(onClick = { dialogs.showChaptersWorkflowDialog = true }) {
                             Text("Пакетная обработка…")
                         }
                     }
@@ -381,7 +174,7 @@ fun MainScreen() {
                     TextButton(onClick = { vm.saveCurrentBook() }) {
                         Text("Сохранить книгу")
                     }
-                    TextButton(onClick = { vm.showLoadBookDialog = true }) {
+                    TextButton(onClick = { dialogs.showLoadBookDialog = true }) {
                         Text("Загрузить книгу")
                     }
                     TextButton(onClick = { vm.importFb2() }, enabled = !vm.isLoading) {
@@ -391,15 +184,15 @@ fun MainScreen() {
                         Text("Импорт EPUB")
                     }
                     TextButton(
-                        onClick = { vm.showClearAllDialog = true },
+                        onClick = { dialogs.showClearAllDialog = true },
                         colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error),
                     ) {
                         Text("Очистить всё")
                     }
-                    TextButton(onClick = { vm.showHelpDialog = true }) {
+                    TextButton(onClick = { dialogs.showHelpDialog = true }) {
                         Text("Помощь")
                     }
-                    IconButton(onClick = { showTokenDialog = true }) {
+                    IconButton(onClick = { dialogs.showTokenDialog = true }) {
                         Text("\u2699", style = MaterialTheme.typography.titleLarge)
                     }
                 },
@@ -608,7 +401,7 @@ fun MainScreen() {
                 Button(
                     onClick = {
                         if (vm.synthesisBackend == SynthesisBackend.Cloud && !TokenStorage.hasCredentials()) {
-                            showTokenDialog = true
+                            dialogs.showTokenDialog = true
                             return@Button
                         }
                         if (vm.viewMode == 1) vm.syncTextFromSegments()
@@ -627,7 +420,7 @@ fun MainScreen() {
                 OutlinedButton(
                     onClick = {
                         if (!TokenStorage.hasCredentials()) {
-                            showTokenDialog = true
+                            dialogs.showTokenDialog = true
                             return@OutlinedButton
                         }
                         vm.launchAutoMarkup()
@@ -655,7 +448,7 @@ fun MainScreen() {
                 OutlinedButton(
                     onClick = {
                         if (vm.synthesisBackend == SynthesisBackend.Cloud && !TokenStorage.hasCredentials()) {
-                            showTokenDialog = true
+                            dialogs.showTokenDialog = true
                             return@OutlinedButton
                         }
                         if (vm.viewMode == 1) vm.syncTextFromSegments()
@@ -674,7 +467,7 @@ fun MainScreen() {
                 }
 
                 OutlinedButton(
-                    onClick = { vm.showResetMarkupDialog = true },
+                    onClick = { dialogs.showResetMarkupDialog = true },
                     enabled = !vm.isLoading,
                     colors = androidx.compose.material3.ButtonDefaults.outlinedButtonColors(
                         contentColor = MaterialTheme.colorScheme.error
