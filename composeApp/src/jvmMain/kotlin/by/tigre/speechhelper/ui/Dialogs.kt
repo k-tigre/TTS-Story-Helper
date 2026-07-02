@@ -914,7 +914,7 @@ fun HelpDialog(onDismiss: () -> Unit) {
         }
         append("Для синтеза речи нужны API Key и Folder ID из Yandex Cloud. ")
         append("Если в настройках не задана модель LLM, те же данные используются для «Авто-разметки» через ")
-        append("Yandex Foundation Models (фиксированная модель deepseek-v32 в вашем каталоге).\n\n")
+        append("Yandex Foundation Models (фиксированная модель deepseek-v4-flash в вашем каталоге).\n\n")
 
         append("Как получить API Key:\n")
         append("  1. Зарегистрируйтесь или войдите в ")

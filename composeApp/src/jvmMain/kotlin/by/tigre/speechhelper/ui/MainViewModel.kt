@@ -5,7 +5,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import by.tigre.speechhelper.TokenStorage
 import by.tigre.speechhelper.data.AiMarkupApi
-import by.tigre.speechhelper.data.AutoMarkupBatchAlign
+import by.tigre.speechhelper.data.AutoMarkupParagraphAnchors
 import by.tigre.speechhelper.data.AutoMarkupFingerprint
 import by.tigre.speechhelper.data.AutoMarkupOrderCheck
 import by.tigre.speechhelper.data.AutoMarkupParagraphPlanner
@@ -1050,7 +1050,10 @@ class MainViewModel(
             fingerprintHex: String,
             contextDetail: String,
         ): Exception? {
-            val chunks = AutoMarkupParagraphPlanner.splitParagraphChunks(sourceFull, chunkLimit)
+            val preceding = AutoMarkupParagraphAnchors.buildPrecedingText(i, originals, working)
+            val overhead = AutoMarkupParagraphAnchors.payloadOverhead(1, preceding)
+            val textLimit = (chunkLimit - overhead).coerceAtLeast(256)
+            val chunks = AutoMarkupParagraphPlanner.splitParagraphChunks(sourceFull, textLimit)
             val subResults = mutableListOf<String>()
             for ((ci, chunk) in chunks.withIndex()) {
                 yield()
@@ -1058,8 +1061,15 @@ class MainViewModel(
                     if (chunks.size > 1) "$contextDetail · часть ${ci + 1}/${chunks.size}" else contextDetail
                 progressMessage = progress?.formatLine(chapterIndex, partDetail) ?: partDetail
                 val systemPrompt = MarkupSystemPrompts.autoMarkupPrompt(voicesAcc)
+                val payload = if (ci == 0) {
+                    AutoMarkupParagraphAnchors.wrapBatchForLlm(listOf(chunk), preceding)
+                } else {
+                    chunk
+                }
                 try {
-                    val marked = callMarkupChunk(chunk, systemPrompt, partDetail)
+                    val markedRaw = callMarkupChunk(payload, systemPrompt, partDetail)
+                    val marked = AutoMarkupParagraphAnchors.parseMarkedBatch(markedRaw, 1)?.singleOrNull()
+                        ?: AutoMarkupParagraphAnchors.stripAnchorsFromText(markedRaw)
                     subResults.add(marked)
                     voicesAcc.addAll(TextParser.extractVoiceNames(marked))
                 } catch (e: CancellationException) {
@@ -1089,14 +1099,17 @@ class MainViewModel(
             val fingerprints = batch.mapIndexed { k, paraIdx ->
                 paraIdx to AutoMarkupFingerprint.sha256Hex(sources[k])
             }
-            val joined = TextParser.joinParagraphsForStorage(sources)
+            val joined = AutoMarkupParagraphPlanner.llmPayloadForBatch(batch, sources, originals, working)
 
             val systemPrompt = MarkupSystemPrompts.autoMarkupPrompt(voicesAcc)
             try {
                 if (batch.size == 1) {
                     val i = batch[0]
                     if (joined.length <= chunkLimit) {
-                        val marked = callMarkupChunk(joined, systemPrompt, packDetail).trim()
+                        val markedRaw = callMarkupChunk(joined, systemPrompt, packDetail).trim()
+                        val marked = AutoMarkupParagraphAnchors.alignBatchOrFallback(sources, markedRaw)
+                            ?.firstOrNull()?.trim()
+                            ?: AutoMarkupParagraphAnchors.stripAnchorsFromText(markedRaw)
                         val ord = AutoMarkupOrderCheck.verify(sources[0], marked)
                         if (!ord.ok) {
                             val label = library.chapters.find { it.id == chapterId }?.name ?: chapterId
@@ -1118,7 +1131,7 @@ class MainViewModel(
 
                 val markedJoined = callMarkupChunk(joined, systemPrompt, packDetail)
                 voicesAcc.addAll(TextParser.extractVoiceNames(markedJoined))
-                val aligned = AutoMarkupBatchAlign.alignOrNull(sources, markedJoined)
+                val aligned = AutoMarkupParagraphAnchors.alignBatchOrFallback(sources, markedJoined)
                 if (aligned != null) {
                     val orderBad = batch.indices.filter {
                         !AutoMarkupOrderCheck.verify(sources[it], aligned[it].trim()).ok

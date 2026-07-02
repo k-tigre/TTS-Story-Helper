@@ -49,7 +49,7 @@ object AiMarkupApi {
     private const val ENDPOINT = "https://ai.api.cloud.yandex.net/v1/chat/completions"
     private const val MAX_SEND_RETRIES = 3
     private const val INITIAL_RETRY_DELAY_MS = 1000L
-    const val DEFAULT_YANDEX_MARKUP_CHUNK_CHARS = 3000
+    const val DEFAULT_YANDEX_MARKUP_CHUNK_CHARS = 10000
 
     private val json = HttpClientProvider.jsonInstance
     private val client = HttpClientProvider.markupClient
@@ -59,7 +59,8 @@ object AiMarkupApi {
         token: String,
         folderId: String,
     ): Flow<MarkupResult> = flow {
-        val model = "gpt://$folderId/deepseek-v32/latest"
+        val model = "gpt://$folderId/deepseek-v4-flash/latest"
+
         val chunks = splitTextForAi(text, DEFAULT_YANDEX_MARKUP_CHUNK_CHARS)
         println("[AiFixDialog] Text split into ${chunks.size} chunk(s)")
 
@@ -115,7 +116,7 @@ object AiMarkupApi {
         folderId: String,
         systemPrompt: String,
     ): String {
-        val model = "gpt://$folderId/deepseek-v32/latest"
+        val model = "gpt://$folderId/deepseek-v4-flash/latest"
 
         // First pass — main markup
         println("[AiMarkup] Pass 1: main markup (${text.length} chars)...")

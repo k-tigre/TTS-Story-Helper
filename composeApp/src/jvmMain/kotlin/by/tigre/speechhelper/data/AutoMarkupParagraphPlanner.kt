@@ -69,9 +69,26 @@ object AutoMarkupParagraphPlanner {
         return runs
     }
 
+    fun llmPayloadForBatch(
+        batchIndices: List<Int>,
+        sources: List<String>,
+        originals: List<String>,
+        working: List<String>,
+    ): String {
+        val preceding = AutoMarkupParagraphAnchors.buildPrecedingText(batchIndices.first(), originals, working)
+        return AutoMarkupParagraphAnchors.wrapBatchForLlm(sources, preceding)
+    }
+
+    fun llmPayloadLength(
+        batchIndices: List<Int>,
+        sources: List<String>,
+        originals: List<String>,
+        working: List<String>,
+    ): Int = llmPayloadForBatch(batchIndices, sources, originals, working).length
+
     /**
      * Внутри одного непрерывного run — жадно набираем батчи, пока
-     * [TextParser.joinParagraphsForStorage] источников не превышает [limit].
+     * полезная нагрузка LLM (контекст + маркеры + текст) не превышает [limit].
      * Один абзац длиннее [limit] попадает в батч из одного индекса (разбивка на запросы — у вызывающего).
      */
     fun greedyBatchesWithinRun(
@@ -90,7 +107,8 @@ object AutoMarkupParagraphPlanner {
                 p++
                 continue
             }
-            if (src0.length > limit) {
+            val singlePayloadLen = llmPayloadLength(listOf(i), listOf(src0), originals, working)
+            if (singlePayloadLen > limit) {
                 batches.add(listOf(i))
                 p++
                 continue
@@ -105,15 +123,12 @@ object AutoMarkupParagraphPlanner {
                     p++
                     continue
                 }
-                if (sj.length > limit) break
-                val candidate = TextParser.joinParagraphsForStorage(sources + sj)
-                if (candidate.length <= limit) {
-                    batch.add(j)
-                    sources.add(sj)
-                    p++
-                } else {
-                    break
-                }
+                val candidateIndices = batch + j
+                val candidateSources = sources + sj
+                if (llmPayloadLength(candidateIndices, candidateSources, originals, working) > limit) break
+                batch.add(j)
+                sources.add(sj)
+                p++
             }
             batches.add(batch)
         }
@@ -182,9 +197,12 @@ object AutoMarkupParagraphPlanner {
                 val sources = batch.map { idx ->
                     sourceTextForAi(originals[idx], working[idx], mode).trim()
                 }
-                val joined = TextParser.joinParagraphsForStorage(sources)
-                total += if (batch.size == 1 && joined.length > chunkLimit) {
-                    splitParagraphChunks(joined, chunkLimit).size
+                val payloadLen = llmPayloadLength(batch, sources, originals, working)
+                total += if (batch.size == 1 && payloadLen > chunkLimit) {
+                    val preceding = AutoMarkupParagraphAnchors.buildPrecedingText(batch.first(), originals, working)
+                    val overhead = AutoMarkupParagraphAnchors.payloadOverhead(1, preceding)
+                    val textLimit = (chunkLimit - overhead).coerceAtLeast(256)
+                    splitParagraphChunks(sources.single(), textLimit).size
                 } else {
                     1
                 }
