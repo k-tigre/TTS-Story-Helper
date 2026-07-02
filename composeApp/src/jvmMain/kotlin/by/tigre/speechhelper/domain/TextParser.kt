@@ -94,6 +94,33 @@ object TextParser {
         return TAG_REGEX.containsMatchIn(input)
     }
 
+    private val SPEECH_DASH = Regex("""[—–]""")
+
+    /**
+     * Прямая речь в художественном тексте: типичные «— …, — сказала она» или несколько тире-реплик в абзаце.
+     */
+    fun hasDirectSpeech(plainText: String): Boolean {
+        val plain = plainText.trim()
+        if (plain.isEmpty()) return false
+        if (SPEECH_DASH.findAll(plain).count() >= 2) return true
+        return SPEECH_WITH_ATTRIBUTION.containsMatchIn(plain)
+    }
+
+    /**
+     * Разметка есть, но вся прямая речь осталась в [voice_main] без голоса персонажа.
+     */
+    fun needsDialogVoiceSplit(markedParagraph: String, originalParagraph: String = ""): Boolean {
+        if (!hasVoiceMarkers(markedParagraph)) return false
+        if (extractVoiceNames(markedParagraph).any { it != "voice_main" }) return false
+        val plain = stripMarkup(markedParagraph).trim().ifBlank { originalParagraph.trim() }
+        return hasDirectSpeech(plain)
+    }
+
+    private val SPEECH_WITH_ATTRIBUTION = Regex(
+        """[—–]\s*\p{L}.{0,120}[—–]\s*(?:\p{L}+\s+){0,3}(?:сказал|сказала|проговорил|проговорила|ответил|ответила|прошептал|прошептала|спросил|спросила|пробормотал|пробормотала|воскликнул|воскликнула|объяснил|объяснила|добавил|добавила|хрипло|тихо|громко|вслух)\b""",
+        setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL),
+    )
+
     fun extractWords(text: String): List<String> {
         return text.split(Regex("\\s+")).filter { it.isNotBlank() }.map { it.lowercase() }
     }

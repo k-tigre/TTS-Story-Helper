@@ -676,6 +676,7 @@ private fun applyParagraphReadinessHighlights(
         )
         val color = when (kind) {
             ParagraphReadinessLabel.NoVoiceTags -> paragraphNoVoiceBg
+            ParagraphReadinessLabel.DialogUnsplit -> paragraphNoVoiceBg
             ParagraphReadinessLabel.MarkedValid -> paragraphReadyBg
             ParagraphReadinessLabel.MarkedInvalid -> paragraphInvalidParaBg
             ParagraphReadinessLabel.MarkedUnvalidated -> paragraphUnvalidatedBg
@@ -793,8 +794,25 @@ private fun MarkupSplitView(
                 )
             }
             Spacer(modifier = Modifier.weight(1f))
-            // Validation indicator
-            if (validationResult != null) {
+            // Validation indicator (учитывает сбой пакета и незавершённую разметку)
+            val validationSummary = ParagraphReadiness.summarizeChapterValidation(
+                validationResult = validationResult,
+                remarkupIndices = remarkupParagraphIndices,
+                originalJoined = originalText,
+                markedParagraphs = markedParagraphs,
+            )
+            if (validationSummary != null) {
+                val indicatorColor = if (validationSummary.isAllReady) {
+                    Color(0xFF4CAF50)
+                } else {
+                    Color(0xFFFF9800)
+                }
+                Text(
+                    text = "${validationSummary.readyCount}/${validationSummary.totalCount}",
+                    style = labelStyle.copy(color = indicatorColor),
+                    modifier = Modifier.padding(horizontal = 8.dp),
+                )
+            } else if (validationResult != null) {
                 val validCount = validationResult.paragraphs.count { it.isValid }
                 val totalCount = validationResult.paragraphs.size
                 val indicatorColor = if (validationResult.isFullyValid) {
@@ -835,7 +853,7 @@ private fun MarkupSplitView(
         }
         Text(
             "Абзацы в «Исходный текст»: зелёный фон — разметка валидна; синий — нет тегов [voice] " +
-                "(режим «Недостающие» берёт такие абзацы по порядку в тексте, с меньшего номера); оранжевый фон абзаца — ошибка «Проверить».",
+                "(режим «Недостающие» берёт такие абзацы по порядку в тексте, с меньшего номера); оранжевый фон — ошибка «Проверить» или сбой авторазметки пакета.",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),

@@ -147,15 +147,26 @@ fun ParagraphAlignedSplitView(
             ) {
                 Text("Исходный текст (по абзацам)", style = labelStyle, modifier = Modifier.weight(1f))
                 if (validationResult != null) {
-                    val validCount = validationResult.paragraphs.count { it.isValid }
-                    val totalCount = validationResult.paragraphs.size
-                    val indicatorColor = if (validationResult.isFullyValid) {
+                    val validationSummary = ParagraphReadiness.summarizeChapterValidation(
+                        validationResult = validationResult,
+                        remarkupIndices = remarkupParagraphIndices,
+                        originalJoined = originalText,
+                        markedParagraphs = markedParagraphs,
+                    )
+                    val (displayCount, displayTotal, allReady) = if (validationSummary != null) {
+                        Triple(validationSummary.readyCount, validationSummary.totalCount, validationSummary.isAllReady)
+                    } else {
+                        val validCount = validationResult.paragraphs.count { it.isValid }
+                        val totalCount = validationResult.paragraphs.size
+                        Triple(validCount, totalCount, validationResult.isFullyValid)
+                    }
+                    val indicatorColor = if (allReady) {
                         Color(0xFF4CAF50)
                     } else {
                         Color(0xFFFF9800)
                     }
                     Text(
-                        text = "$validCount/$totalCount",
+                        text = "$displayCount/$displayTotal",
                         style = labelStyle.copy(color = indicatorColor),
                         modifier = Modifier.padding(horizontal = 8.dp),
                     )
@@ -229,6 +240,8 @@ fun ParagraphAlignedSplitView(
                                         "Сбой пакета" to Color(0xFFE65100)
                                     ParagraphReadinessLabel.NoVoiceTags ->
                                         "Без [voice]" to Color(0xFF1565C0)
+                                    ParagraphReadinessLabel.DialogUnsplit ->
+                                        "Диалог" to Color(0xFF6A1B9A)
                                     ParagraphReadinessLabel.MarkedValid ->
                                         "Готово" to Color(0xFF2E7D32)
                                     ParagraphReadinessLabel.MarkedInvalid ->

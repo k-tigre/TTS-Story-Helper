@@ -63,15 +63,37 @@ class AutoMarkupParagraphAnchorsTest {
     }
 
     @Test
-    fun parseMarkedBatch_rejectsOutOfOrderIds() {
+    fun parseMarkedBatch_acceptsOutOfOrderIdsByMarkerNumber() {
         val output = """
             ⟦p:0001⟧
-            Второй
+            [voice_actor]
+            Второй.
+            [/voice_actor]
 
             ⟦p:0000⟧
-            Первый
+            [voice_main]
+            Первый.
+            [/voice_main]
         """.trimIndent()
-        assertNull(AutoMarkupParagraphAnchors.parseMarkedBatch(output, 2))
+        val parsed = AutoMarkupParagraphAnchors.parseMarkedBatch(output, 2)
+        assertNotNull(parsed)
+        assertTrue(parsed[0].contains("Первый"))
+        assertTrue(parsed[1].contains("Второй"))
+    }
+
+    @Test
+    fun parseMarkedBatch_stripsCtxBlockFromOutput() {
+        val output = """
+            ⟦ctx⟧
+            старый контекст
+            ⟦/ctx⟧
+
+            ⟦p:0000⟧
+            Текст абзаца.
+        """.trimIndent()
+        val parsed = AutoMarkupParagraphAnchors.parseMarkedBatch(output, 1)
+        assertNotNull(parsed)
+        assertEquals("Текст абзаца.", parsed.single())
     }
 
     @Test

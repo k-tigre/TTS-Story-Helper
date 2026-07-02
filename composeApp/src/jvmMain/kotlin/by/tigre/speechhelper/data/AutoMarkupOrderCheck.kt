@@ -12,8 +12,15 @@ object AutoMarkupOrderCheck {
     /** Доля значимых слов исходника, которые должны найтись по порядку в разметке. */
     private const val MIN_ORDER_MATCH_RATIO = 0.88
 
+    /**
+     * Ниже полного порога, но достаточно для сохранения с пометкой «нужна ручная правка».
+     * Типичный случай: модель чуть переставила границы голосов, текст в целом тот же.
+     */
+    private const val SOFT_ORDER_MATCH_RATIO = 0.60
+
     data class Result(
         val ok: Boolean,
+        val softOk: Boolean,
         val matchedWordCount: Int,
         val sourceWordCount: Int,
     ) {
@@ -22,11 +29,15 @@ object AutoMarkupOrderCheck {
     }
 
     fun verify(sourceSentToModel: String, markedModelOutput: String): Result {
-        val src = TextParser.extractCompareWords(sourceSentToModel)
+        val src = TextParser.extractCompareWords(
+            AutoMarkupParagraphAnchors.stripAnchorsFromText(sourceSentToModel),
+        )
         if (src.isEmpty()) {
-            return Result(ok = true, matchedWordCount = 0, sourceWordCount = 0)
+            return Result(ok = true, softOk = true, matchedWordCount = 0, sourceWordCount = 0)
         }
-        val out = TextParser.extractCompareWords(markedModelOutput)
+        val out = TextParser.extractCompareWords(
+            AutoMarkupParagraphAnchors.stripAnchorsFromText(markedModelOutput),
+        )
         var j = 0
         var matched = 0
         for (w in src) {
@@ -39,6 +50,7 @@ object AutoMarkupOrderCheck {
         val ratio = matched.toDouble() / src.size
         return Result(
             ok = ratio >= MIN_ORDER_MATCH_RATIO,
+            softOk = ratio >= SOFT_ORDER_MATCH_RATIO,
             matchedWordCount = matched,
             sourceWordCount = src.size,
         )

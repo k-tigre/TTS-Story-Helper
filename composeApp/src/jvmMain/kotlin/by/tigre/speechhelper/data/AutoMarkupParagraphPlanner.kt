@@ -38,19 +38,22 @@ object AutoMarkupParagraphPlanner {
     private fun paragraphNeedsFill(r: StoredChapterParagraph): Boolean {
         val t = r.markedText.trim().ifBlank { r.originalText.trim() }
         if (t.isEmpty()) return false
-        return !TextParser.hasVoiceMarkers(r.markedText)
+        if (!TextParser.hasVoiceMarkers(r.markedText)) return true
+        return TextParser.needsDialogVoiceSplit(r.markedText, r.originalText)
     }
 
     private fun paragraphHasRunnableContent(r: StoredChapterParagraph): Boolean =
         r.markedText.isNotBlank() || r.originalText.isNotBlank()
 
-    fun sourceTextForAi(originalLine: String, markedLine: String, mode: AutoMarkupMode): String =
-        when (mode) {
-            AutoMarkupMode.FullRemark ->
-                markedLine.trim().ifBlank { originalLine.trim() }
-            AutoMarkupMode.FillMissing ->
-                originalLine.trim().ifBlank { TextParser.stripMarkup(markedLine).trim() }
+    fun sourceTextForAi(originalLine: String, markedLine: String, mode: AutoMarkupMode): String {
+        val original = originalLine.trim()
+        val strippedMarked = TextParser.stripMarkup(markedLine).trim()
+        return when (mode) {
+            AutoMarkupMode.FullRemark,
+            AutoMarkupMode.FillMissing,
+            -> original.ifBlank { strippedMarked }
         }
+    }
 
     /** Непрерывные участки по индексам абзацев в документе: …, 2,3,4 | 7,8 … */
     fun consecutiveIndexRuns(sortedIndices: List<Int>): List<List<Int>> {

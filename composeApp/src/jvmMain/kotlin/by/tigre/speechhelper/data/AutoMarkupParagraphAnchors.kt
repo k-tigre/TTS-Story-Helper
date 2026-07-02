@@ -14,8 +14,11 @@ object AutoMarkupParagraphAnchors {
     const val CTX_CLOSE = "⟦/ctx⟧"
 
     private val PARA_MARKER = Regex("""⟦p:(\d{4})⟧""")
+    private val CTX_BLOCK = Regex("""⟦ctx⟧[\s\S]*?⟦/ctx⟧""", RegexOption.IGNORE_CASE)
 
     fun paraMarker(index: Int): String = "⟦p:${"%04d".format(index)}⟧"
+
+    fun stripCtxBlock(text: String): String = CTX_BLOCK.replace(text, "").trim()
 
     /** Текст соседних абзацев: размеченный, если есть голоса, иначе оригинал. */
     fun paragraphTextForContext(original: String, working: String): String {
@@ -82,25 +85,31 @@ object AutoMarkupParagraphAnchors {
 
     /**
      * Разбирает ответ модели по маркерам ⟦p:NNNN⟧.
+     * Маркеры могут идти в файле не по порядку id — сопоставление по номеру ⟦p:…⟧.
      * @return null, если маркеров недостаточно или id не совпадают с 0..expectedCount-1.
      */
     fun parseMarkedBatch(markedOutput: String, expectedCount: Int): List<String>? {
         if (expectedCount <= 0) return emptyList()
-        val markers = PARA_MARKER.findAll(markedOutput).toList()
+        val cleaned = stripCtxBlock(markedOutput)
+        val markers = PARA_MARKER.findAll(cleaned).toList()
         if (markers.size < expectedCount) return null
 
-        val byId = markers.groupBy { it.groupValues[1].toIntOrNull() ?: return null }
+        val byId = mutableMapOf<Int, MatchResult>()
+        for (marker in markers) {
+            val id = marker.groupValues[1].toIntOrNull() ?: return null
+            if (id in byId) return null
+            byId[id] = marker
+        }
         if (byId.keys != (0 until expectedCount).toSet()) return null
-        if (byId.values.any { it.size != 1 }) return null
 
-        val ordered = markers.sortedBy { it.range.first }
-        val ids = ordered.map { it.groupValues[1].toInt() }
-        if (ids != (0 until expectedCount).toList()) return null
-
-        return ordered.mapIndexed { i, marker ->
+        val byPosition = markers.sortedBy { it.range.first }
+        return (0 until expectedCount).map { id ->
+            val marker = byId[id]!!
             val contentStart = marker.range.last + 1
-            val contentEnd = if (i + 1 < ordered.size) ordered[i + 1].range.first else markedOutput.length
-            stripAnchorsFromText(markedOutput.substring(contentStart, contentEnd).trim())
+            val contentEnd = byPosition
+                .firstOrNull { it.range.first > marker.range.first }
+                ?.range?.first ?: cleaned.length
+            stripAnchorsFromText(cleaned.substring(contentStart, contentEnd).trim())
         }
     }
 
