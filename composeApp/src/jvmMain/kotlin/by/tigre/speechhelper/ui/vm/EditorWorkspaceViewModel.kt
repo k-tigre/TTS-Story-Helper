@@ -206,7 +206,11 @@ class EditorWorkspaceViewModel(
         if (index <= 0 || index >= segments.size) return null
         val prev = segments[index - 1]
         val curr = segments[index]
-        segments[index - 1] = prev.copy(text = joinMergedSegmentTexts(prev.text, curr.text))
+        val mergedVoice = prev.voiceName ?: curr.voiceName
+        segments[index - 1] = prev.copy(
+            voiceName = mergedVoice,
+            text = joinMergedSegmentTexts(prev.text, curr.text),
+        )
         segments.removeAt(index)
         syncTextFromSegments()
         SessionStorage.setChapterText(currentChapterId(), text)
@@ -218,12 +222,59 @@ class EditorWorkspaceViewModel(
         if (index < 0 || index >= segments.size - 1) return null
         val curr = segments[index]
         val next = segments[index + 1]
-        segments[index] = curr.copy(text = joinMergedSegmentTexts(curr.text, next.text))
+        val mergedVoice = curr.voiceName ?: next.voiceName
+        segments[index] = curr.copy(
+            voiceName = mergedVoice,
+            text = joinMergedSegmentTexts(curr.text, next.text),
+        )
         segments.removeAt(index + 1)
         syncTextFromSegments()
         SessionStorage.setChapterText(currentChapterId(), text)
         revalidate()
         return "Сегмент объединён со следующим"
+    }
+
+    /**
+     * Объединяет абзац с предыдущим в оригинале и склеивает разметку (соседние [voice_main] → один блок).
+     */
+    fun mergeOriginalParagraphWithPrevious(paragraphIndex: Int): String? {
+        if (paragraphIndex <= 0) return null
+        val origParas = TextParser.splitParagraphsForStorage(originalText)
+        val markedParas = TextParser.splitParagraphsForStorage(text)
+        if (paragraphIndex !in origParas.indices) return null
+
+        val newOrig = origParas.toMutableList()
+        newOrig[paragraphIndex - 1] = joinMergedSegmentTexts(
+            newOrig[paragraphIndex - 1],
+            newOrig[paragraphIndex],
+        )
+        newOrig.removeAt(paragraphIndex)
+
+        val normalized = if (markedParas.size == origParas.size && TextParser.hasVoiceMarkers(text)) {
+            val m = markedParas.toMutableList()
+            val chunk = TextParser.joinParagraphsForStorage(
+                listOf(m[paragraphIndex - 1], m[paragraphIndex]),
+            )
+            m[paragraphIndex - 1] = TextParser.normalizeMarkupAfterAi(chunk)
+            m.removeAt(paragraphIndex)
+            TextParser.normalizeMarkupAfterAi(TextParser.joinParagraphsForStorage(m))
+        } else if (TextParser.hasVoiceMarkers(text)) {
+            TextParser.normalizeMarkupAfterAi(text)
+        } else {
+            TextParser.joinParagraphsForStorage(newOrig)
+        }
+
+        originalText = TextParser.joinParagraphsForStorage(newOrig)
+        text = normalized
+        val id = currentChapterId()
+        SessionStorage.setOriginalText(id, originalText)
+        SessionStorage.setChapterText(id, text)
+        val refreshed = TextParser.refreshMarkedRowsForOriginals(newOrig, text)
+        SessionStorage.replaceAllParagraphsForChapter(id, newOrig.zip(refreshed))
+        segments.clear()
+        segments.addAll(TextParser.parse(text))
+        revalidate()
+        return "Абзацы ${paragraphIndex} и ${paragraphIndex + 1} объединены"
     }
 
     fun resetMarkup() {
@@ -232,6 +283,8 @@ class EditorWorkspaceViewModel(
         SessionStorage.setChapterText(currentChapterId(), text)
         markupModeEnabled = true
         viewMode = 0
+        segments.clear()
+        segments.addAll(TextParser.parse(text))
         validationResult = null
     }
 

@@ -194,10 +194,19 @@ class MainViewModel(
         }
     }
 
-    fun saveCurrentChapter() = library.saveCurrentChapter()
+    /** Сбрасывается при revalidate/reset — принудительное обновление подсветки в редакторе. */
+    var editorUiRevision by mutableStateOf(0)
+        private set
+
+    fun saveCurrentChapter() {
+        if (viewMode == 1) commitSegmentEdits(persist = true, bumpHighlight = false)
+        library.saveCurrentChapter()
+    }
 
     fun switchToChapter(id: String) {
+        if (viewMode == 1) commitSegmentEdits(persist = true, bumpHighlight = false)
         library.switchToChapter(id)
+        editorUiRevision++
         statusMessage = ""
     }
 
@@ -213,7 +222,11 @@ class MainViewModel(
 
     fun saveCurrentBook() = library.saveCurrentBook()
     fun saveBook(bookName: String) = library.saveBook(bookName)
-    fun loadBook(bookId: String) = library.loadBook(bookId)
+    fun loadBook(bookId: String) {
+        library.loadBook(bookId)
+        editor.revalidate()
+        editorUiRevision++
+    }
     fun importFb2() = library.importFb2()
     fun importEpub() = library.importEpub()
 
@@ -289,19 +302,47 @@ class MainViewModel(
     fun syncTextFromSegments() = editor.syncTextFromSegments()
 
     fun mergeSegmentWithPrevious(index: Int) {
-        editor.mergeSegmentWithPrevious(index)?.let { statusMessage = it }
+        editor.mergeSegmentWithPrevious(index)?.let {
+            statusMessage = it
+            editorUiRevision++
+        }
     }
 
     fun mergeSegmentWithNext(index: Int) {
-        editor.mergeSegmentWithNext(index)?.let { statusMessage = it }
+        editor.mergeSegmentWithNext(index)?.let {
+            statusMessage = it
+            editorUiRevision++
+        }
+    }
+
+    /** Синхронизирует правки в режиме «Разбивка» с текстом главы и валидацией. */
+    fun commitSegmentEdits(persist: Boolean = true, bumpHighlight: Boolean = true) {
+        editor.syncTextFromSegments()
+        if (persist) {
+            SessionStorage.setChapterText(library.currentChapterId, editor.text)
+        }
+        editor.revalidate()
+        if (bumpHighlight) editorUiRevision++
+    }
+
+    fun mergeChapterParagraphWithPrevious(paragraphIndex: Int) {
+        editor.mergeOriginalParagraphWithPrevious(paragraphIndex)?.let {
+            statusMessage = it
+            editorUiRevision++
+        }
     }
 
     fun resetMarkup() {
+        clearRemarkupNeededForChapter(library.currentChapterId)
         editor.resetMarkup()
+        editorUiRevision++
         dialogs.showResetMarkupDialog = false
     }
 
-    fun revalidate() = editor.revalidate()
+    fun revalidate() {
+        editor.revalidate()
+        editorUiRevision++
+    }
 
     fun syncSegmentsFromText(previousMarkupForIncremental: String? = null) =
         editor.syncSegmentsFromText(previousMarkupForIncremental)
@@ -312,6 +353,7 @@ class MainViewModel(
         if (prev == newText) return
         editor.text = newText
         editor.syncSegmentsFromText(previousMarkupForIncremental = prev)
+        editorUiRevision++
     }
 
     fun updateOriginalText(newOriginal: String) = editor.updateOriginalText(newOriginal)
@@ -1282,12 +1324,22 @@ class MainViewModel(
         voicesAcc: Set<String>,
     ) {
         if (chapterId != library.currentChapterId) return
-        editor.text = TextParser.joinParagraphsForStorage(working)
+        val joined = TextParser.joinParagraphsForStorage(working)
+        val normalized = if (TextParser.hasVoiceMarkers(joined)) {
+            TextParser.normalizeMarkupAfterAi(joined)
+        } else {
+            joined
+        }
+        val refreshedRows = TextParser.refreshMarkedRowsForOriginals(originals, normalized)
         editor.originalText = TextParser.joinParagraphsForStorage(originals)
+        editor.text = normalized
+        SessionStorage.replaceAllParagraphsForChapter(chapterId, originals.zip(refreshedRows))
         editor.markupModeEnabled = true
         editor.ensureVoiceMappings(voicesAcc)
         editor.saveVoiceMapping()
+        editor.syncSegmentsFromText()
         editor.revalidate()
+        editorUiRevision++
     }
 
     /**

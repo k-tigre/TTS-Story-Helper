@@ -94,16 +94,48 @@ object TextParser {
         return TAG_REGEX.containsMatchIn(input)
     }
 
-    private val SPEECH_DASH = Regex("""[—–]""")
+    private const val SPEECH_VERB_PATTERN =
+        """(?:сказал|сказала|проговорил|проговорила|ответил|ответила|прошептал|прошептала|спросил|спросила|пробормотал|пробормотала|воскликнул|воскликнула|крикнул|крикнула|объяснил|объяснила|добавил|добавила|выпалила|выпалил|буркнул|буркнула|произнесла|произнес|произнёс|произнесла|хрипло|тихо|громко|вслух|шепотом)\b"""
+
+    /** Тире-реплика с заглавной после границы фразы: «— Она пошла», не «поняла — и ушла». */
+    private val DIALOGUE_OPENING_DASH = Regex("""(?:^|[\n.!?…]\s*)(?:—|–)\s+\p{Lu}\p{L}""")
+
+    /** — реплика, — сказала она (классическое тире-диалог). */
+    private val SPEECH_WITH_ATTRIBUTION = Regex(
+        """(?:—|–)\s*\p{L}.{0,160}(?:—|–)\s*(?:\p{L}+\s+){0,4}$SPEECH_VERB_PATTERN""",
+        setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL),
+    )
 
     /**
-     * Прямая речь в художественном тексте: типичные «— …, — сказала она» или несколько тире-реплик в абзаце.
+     * Прямая речь: тире-реплики, «кавычки» с глаголом речи, не одиночное тире в повествовании.
      */
     fun hasDirectSpeech(plainText: String): Boolean {
         val plain = plainText.trim()
         if (plain.isEmpty()) return false
-        if (SPEECH_DASH.findAll(plain).count() >= 2) return true
-        return SPEECH_WITH_ATTRIBUTION.containsMatchIn(plain)
+        if (DIALOGUE_OPENING_DASH.containsMatchIn(plain)) return true
+        if (SPEECH_WITH_ATTRIBUTION.containsMatchIn(plain)) return true
+        if (hasGuillemetSpeechAttribution(plain)) return true
+        return false
+    }
+
+    private val SPEECH_VERB_LEMMAS = listOf(
+        "сказал", "сказала", "проговорил", "проговорила", "ответил", "ответила",
+        "прошептал", "прошептала", "спросил", "спросила", "пробормотал", "пробормотала",
+        "воскликнул", "воскликнула", "крикнул", "крикнула", "объяснил", "объяснила",
+        "добавил", "добавила", "выпалила", "выпалил", "буркнул", "буркнула",
+        "произнесла", "произнес", "произнёс", "произнесла",
+    )
+
+    private fun hasSpeechVerbNear(fragment: String): Boolean {
+        val s = fragment.lowercase()
+        return SPEECH_VERB_LEMMAS.any { verb -> s.contains(verb) }
+    }
+
+    private fun hasGuillemetSpeechAttribution(plain: String): Boolean {
+        val open = plain.indexOf('«')
+        val close = plain.indexOf('»', if (open >= 0) open + 1 else 0)
+        if (close < 0) return false
+        return hasSpeechVerbNear(plain.substring(close + 1).take(64))
     }
 
     /**
@@ -115,11 +147,6 @@ object TextParser {
         val plain = stripMarkup(markedParagraph).trim().ifBlank { originalParagraph.trim() }
         return hasDirectSpeech(plain)
     }
-
-    private val SPEECH_WITH_ATTRIBUTION = Regex(
-        """[—–]\s*\p{L}.{0,120}[—–]\s*(?:\p{L}+\s+){0,3}(?:сказал|сказала|проговорил|проговорила|ответил|ответила|прошептал|прошептала|спросил|спросила|пробормотал|пробормотала|воскликнул|воскликнула|объяснил|объяснила|добавил|добавила|хрипло|тихо|громко|вслух)\b""",
-        setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL),
-    )
 
     fun extractWords(text: String): List<String> {
         return text.split(Regex("\\s+")).filter { it.isNotBlank() }.map { it.lowercase() }
@@ -495,7 +522,8 @@ object TextParser {
             missingOriginalWordIndices = missingOriginalWordIndices,
             extraMarkupSignificantWordIndicesBySegment = extraMarkupSignificantWordIndicesBySegment,
         )
-        return mapping to consumedUpTo
+        val nextPos = if (mapping.isValid || matchedOrigSig.size >= origSigs.size) consumedUpTo else flatWordPos
+        return mapping to nextPos
     }
 
     /**
@@ -580,6 +608,113 @@ object TextParser {
     }
 
     /**
+     * Один абзац оригинала, сопоставленный с сегментом(ами) разметки: для хранения по строкам
+     * берём текст оригинала этого абзаца в голосе сегмента (не дублируем соседние абзацы в блоке).
+     */
+    fun markedRowForOriginalParagraph(
+        originalParagraph: String,
+        matchedSegments: List<TextSegment>,
+    ): String {
+        val plain = originalParagraph.trim()
+        if (plain.isEmpty()) return ""
+        if (matchedSegments.isEmpty()) return plain
+        val voices = matchedSegments.mapNotNull { it.voiceName }.toSet()
+        return when {
+            voices.size == 1 -> {
+                val v = voices.single()
+                "[$v]\n$plain\n[/$v]"
+            }
+            matchedSegments.all { it.voiceName == null } -> plain
+            else -> plain
+        }
+    }
+
+    /** После [normalizeMarkupAfterAi] — строки разметки по абзацам оригинала без дублирования текста соседей. */
+    fun refreshMarkedRowsForOriginals(
+        originals: List<String>,
+        chapterMarkup: String,
+    ): List<String> {
+        if (originals.isEmpty()) return emptyList()
+        val trimmedMarkup = chapterMarkup.trim()
+        if (trimmedMarkup.isEmpty() || !hasVoiceMarkers(trimmedMarkup)) {
+            return originals.map { it.trim() }
+        }
+        val segments = parse(trimmedMarkup)
+        val mappings = buildParagraphMapping(originals, segments).paragraphs
+        return originals.indices.map { i ->
+            val mapping = mappings.getOrNull(i) ?: return@map originals[i].trim()
+            val segs = mapping.matchedSegmentIndices.mapNotNull { idx -> segments.getOrNull(idx) }
+            markedRowForOriginalParagraph(originals[i], segs)
+        }
+    }
+
+    fun paragraphSharesMatchedSegmentsWithPrevious(
+        paragraphIndex: Int,
+        validation: ValidationResult,
+    ): Boolean {
+        if (paragraphIndex <= 0) return false
+        val cur = validation.paragraphs.getOrNull(paragraphIndex)?.matchedSegmentIndices.orEmpty()
+        val prev = validation.paragraphs.getOrNull(paragraphIndex - 1)?.matchedSegmentIndices.orEmpty()
+        if (cur.isEmpty() || prev.isEmpty()) return false
+        if (cur == prev) return true
+        // Один сегмент на два абзаца: у следующего только хвост уже показанного блока.
+        val prevLast = prev.last()
+        return cur.first() == prevLast && cur.all { it >= prevLast }
+    }
+
+    /**
+     * Индексы сегментов главы для строки «Разбивка»: сначала по разметке абзаца (точнее после
+     * авторазметки), иначе — из [ValidationResult].
+     */
+    fun displaySegmentIndicesForParagraph(
+        paragraphIndex: Int,
+        markedParagraph: String,
+        validation: ValidationResult?,
+        allSegments: List<TextSegment>,
+        searchStartIndex: Int,
+    ): List<Int> {
+        if (hasVoiceMarkers(markedParagraph)) {
+            val local = parse(markedParagraph)
+            if (local.isNotEmpty()) {
+                var cursor = searchStartIndex
+                val indices = mutableListOf<Int>()
+                for (piece in local) {
+                    val idx = allSegments.indexOfFirstFrom(cursor) { global ->
+                        global.voiceName == piece.voiceName &&
+                            segmentTextsEquivalent(global.text, piece.text)
+                    }
+                    if (idx < 0) break
+                    indices.add(idx)
+                    cursor = idx + 1
+                }
+                if (indices.isNotEmpty()) return indices
+            }
+        }
+        return validation?.paragraphs?.getOrNull(paragraphIndex)?.matchedSegmentIndices.orEmpty()
+    }
+
+    private fun List<TextSegment>.indexOfFirstFrom(
+        start: Int,
+        predicate: (TextSegment) -> Boolean,
+    ): Int {
+        for (i in start.coerceAtLeast(0) until size) {
+            if (predicate(this[i])) return i
+        }
+        return -1
+    }
+
+    private fun segmentTextsEquivalent(a: String, b: String): Boolean {
+        val na = normalizedSignificantTokens(stripMarkup(a))
+        val nb = normalizedSignificantTokens(stripMarkup(b))
+        return na.isNotEmpty() && na == nb
+    }
+
+    private fun normalizedSignificantTokens(text: String): List<String> =
+        splitCompareWhitespace(text)
+            .map { normalizeCompareToken(it) }
+            .filter { it.isNotEmpty() }
+
+    /**
      * После авто-разметки: фрагменты только с паузами `<[…]>` между блоками `[voice]…[/voice]`
      * оказываются без голоса и дают «тихую» паузу в TTS — переносим их внутрь соседнего голоса
      * (предпочтительно следующего). Затем склеиваем подряд идущие сегменты с одним именем голоса.
@@ -631,7 +766,9 @@ object TextParser {
         val mergedVoices = mutableListOf<TextSegment>()
         for (seg in segs) {
             val last = mergedVoices.lastOrNull()
-            if (last != null && last.voiceName != null && seg.voiceName == last.voiceName) {
+            if (last != null && last.voiceName != null && seg.voiceName == last.voiceName &&
+                shouldMergeSameVoiceSegments(last.text, seg.text)
+            ) {
                 val a = last.text.trim()
                 val b = seg.text.trim()
                 mergedVoices[mergedVoices.lastIndex] = last.copy(
@@ -646,6 +783,20 @@ object TextParser {
             }
         }
         return buildText(mergedVoices)
+    }
+
+    /**
+     * Не склеиваем два полноценных блока повествования: иначе соседние абзацы одним голосом
+     * сливаются в один сегмент и ломают сопоставление в «Разбивке».
+     */
+    private fun shouldMergeSameVoiceSegments(left: String, right: String): Boolean {
+        val a = left.trim()
+        val b = right.trim()
+        if (a.isEmpty() || b.isEmpty()) return true
+        if (a.contains("\n\n") || b.contains("\n\n")) return false
+        val wordsA = normalizedSignificantTokens(a).size
+        val wordsB = normalizedSignificantTokens(b).size
+        return wordsA < 8 || wordsB < 8
     }
 
     /** Сегмент без голоса, в котором после снятия разметки не остаётся текста (только паузы и пробелы). */

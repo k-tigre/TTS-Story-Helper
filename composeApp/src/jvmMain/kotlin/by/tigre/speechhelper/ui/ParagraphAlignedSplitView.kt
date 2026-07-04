@@ -76,6 +76,7 @@ fun ParagraphAlignedSplitView(
     /** Индексы абзацев (1-я колонка), где батч авторазметки не сопоставился с ответом модели. */
     remarkupParagraphIndices: Set<Int> = emptySet(),
     onRemarkupParagraph: (Int) -> Unit = {},
+    onMergeParagraphWithPrevious: (Int) -> Unit = {},
     onChangeSegmentVoice: (Int, String?) -> Unit,
     availableVoiceNames: List<String>,
     isLoading: Boolean,
@@ -132,6 +133,38 @@ fun ParagraphAlignedSplitView(
         }
     }
 
+    val displaySegmentIndicesByParagraph = remember(
+        showRows,
+        markedParagraphs,
+        segments,
+        validationResult,
+    ) {
+        var searchStart = 0
+        showRows.map { (paraIndex, _) ->
+            val indices = TextParser.displaySegmentIndicesForParagraph(
+                paragraphIndex = paraIndex,
+                markedParagraph = markedParagraphs.getOrElse(paraIndex) { "" },
+                validation = validationResult,
+                allSegments = segments,
+                searchStartIndex = searchStart,
+            )
+            if (indices.isNotEmpty()) {
+                searchStart = indices.last() + 1
+            }
+            indices
+        }
+    }
+
+    fun paragraphContinuesPreviousSegment(rowIndex: Int): Boolean {
+        if (rowIndex <= 0) return false
+        val cur = displaySegmentIndicesByParagraph.getOrNull(rowIndex).orEmpty()
+        val prev = displaySegmentIndicesByParagraph.getOrNull(rowIndex - 1).orEmpty()
+        if (cur.isEmpty() || prev.isEmpty()) return false
+        if (cur == prev) return true
+        val prevLast = prev.last()
+        return cur.first() == prevLast && cur.all { it >= prevLast }
+    }
+
     Column(
         modifier = modifier
             .border(1.dp, outlineColor, RoundedCornerShape(4.dp)),
@@ -146,27 +179,20 @@ fun ParagraphAlignedSplitView(
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Text("Исходный текст (по абзацам)", style = labelStyle, modifier = Modifier.weight(1f))
-                if (validationResult != null) {
-                    val validationSummary = ParagraphReadiness.summarizeChapterValidation(
-                        validationResult = validationResult,
-                        remarkupIndices = remarkupParagraphIndices,
-                        originalJoined = originalText,
-                        markedParagraphs = markedParagraphs,
-                    )
-                    val (displayCount, displayTotal, allReady) = if (validationSummary != null) {
-                        Triple(validationSummary.readyCount, validationSummary.totalCount, validationSummary.isAllReady)
-                    } else {
-                        val validCount = validationResult.paragraphs.count { it.isValid }
-                        val totalCount = validationResult.paragraphs.size
-                        Triple(validCount, totalCount, validationResult.isFullyValid)
-                    }
-                    val indicatorColor = if (allReady) {
+                val validationSummary = ParagraphReadiness.summarizeChapterValidation(
+                    validationResult = validationResult,
+                    remarkupIndices = remarkupParagraphIndices,
+                    originalJoined = originalText,
+                    markedParagraphs = markedParagraphs,
+                )
+                if (validationSummary != null) {
+                    val indicatorColor = if (validationSummary.isAllReady) {
                         Color(0xFF4CAF50)
                     } else {
                         Color(0xFFFF9800)
                     }
                     Text(
-                        text = "$displayCount/$displayTotal",
+                        text = "${validationSummary.readyCount}/${validationSummary.totalCount}",
                         style = labelStyle.copy(color = indicatorColor),
                         modifier = Modifier.padding(horizontal = 8.dp),
                     )
@@ -182,7 +208,7 @@ fun ParagraphAlignedSplitView(
                 Text("Сегменты разбивки", style = labelStyle, modifier = Modifier.weight(1f))
             }
             Text(
-                "Ярлыки у абзаца: «Готово» — есть [voice] и проверка; «Без [voice]» — попадёт в «Недостающие» по порядку; «Ошибка» — после «Проверить».",
+                "Ярлыки у абзаца: «Готово» / «Повествование» — можно озвучивать; «Без [voice]» — нужна разметка; «↳ тот же сегмент» — продолжение длинного блока одним голосом.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(top = 6.dp),
@@ -200,7 +226,11 @@ fun ParagraphAlignedSplitView(
             items(showRows.size, key = { showRows[it].first }) { rowIdx ->
                 val (paraIndex, paraText) = showRows[rowIdx]
                 val paraCount = if (paraDrafts.isNotEmpty()) paraDrafts.size else 1
-                val segIdxs = segmentIndicesForParagraph(paraIndex, paraCount)
+                val segIdxs = displaySegmentIndicesByParagraph.getOrElse(rowIdx) {
+                    segmentIndicesForParagraph(paraIndex, paraCount)
+                }
+                val continuesPrevSegment = paragraphContinuesPreviousSegment(rowIdx)
+                val canMergeParagraph = paraIndex > 0 && !continuesPrevSegment
                 val needsParagraphRemarkup = paraIndex in remarkupParagraphIndices
 
                 Row(
@@ -240,6 +270,8 @@ fun ParagraphAlignedSplitView(
                                         "Сбой пакета" to Color(0xFFE65100)
                                     ParagraphReadinessLabel.NoVoiceTags ->
                                         "Без [voice]" to Color(0xFF1565C0)
+                                    ParagraphReadinessLabel.NarrationOnly ->
+                                        "Повествование" to Color(0xFF2E7D32)
                                     ParagraphReadinessLabel.DialogUnsplit ->
                                         "Диалог" to Color(0xFF6A1B9A)
                                     ParagraphReadinessLabel.MarkedValid ->
@@ -276,6 +308,16 @@ fun ParagraphAlignedSplitView(
                                     Text("Переразметить абзац", style = labelStyle)
                                 }
                             }
+                            if (canMergeParagraph) {
+                                OutlinedButton(
+                                    onClick = { onMergeParagraphWithPrevious(paraIndex) },
+                                    enabled = !isLoading,
+                                    modifier = Modifier.height(28.dp),
+                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+                                ) {
+                                    Text("Слить с пред.", style = labelStyle)
+                                }
+                            }
                         }
                         OutlinedTextField(
                             value = if (paraDrafts.isNotEmpty()) paraDrafts.getOrElse(paraIndex) { "" } else paraText,
@@ -304,7 +346,15 @@ fun ParagraphAlignedSplitView(
                         modifier = Modifier.weight(1f),
                         verticalArrangement = Arrangement.spacedBy(6.dp),
                     ) {
-                        if (segIdxs.isEmpty() && segments.isNotEmpty()) {
+                        if (continuesPrevSegment) {
+                            val segNums = segIdxs.joinToString(", ") { "${it + 1}" }
+                            Text(
+                                "↳ тот же сегмент $segNums (продолжение повествования)",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(horizontal = 4.dp),
+                            )
+                        } else if (segIdxs.isEmpty() && segments.isNotEmpty()) {
                             Text(
                                 "Нет сопоставленных сегментов (нажмите «Проверить» или поправьте текст).",
                                 style = MaterialTheme.typography.bodySmall,
@@ -312,6 +362,7 @@ fun ParagraphAlignedSplitView(
                             )
                         }
                         for (realIndex in segIdxs) {
+                            if (continuesPrevSegment) break
                             if (realIndex !in segments.indices) continue
                             val segment = segments[realIndex]
                             val settings = if (segment.voiceName != null) {

@@ -45,6 +45,7 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -127,8 +128,8 @@ fun MainScreen() {
         }
     }
 
-    // Синхронизация сегментов при смене режима (смена главы уже делает revalidate в редакторе)
-    LaunchedEffect(vm.viewMode, vm.isLoading) {
+    // Синхронизация сегментов при смене режима или главы
+    LaunchedEffect(vm.viewMode, vm.isLoading, vm.currentChapterId) {
         if (vm.isLoading) return@LaunchedEffect
         vm.syncSegmentsFromText()
     }
@@ -244,13 +245,17 @@ fun MainScreen() {
                             TextParser.joinSegmentTextsAsPlainOriginal(TextParser.parse(vm.text))
                         }
                     }
-                    val markedParagraphs = remember(vm.text) { TextParser.splitParagraphsForStorage(vm.text) }
+                    val markedParagraphs = remember(vm.text, splitOriginal, vm.editorUiRevision) {
+                        val originals = TextParser.splitParagraphsForStorage(splitOriginal)
+                        TextParser.refreshMarkedRowsForOriginals(originals, vm.text)
+                    }
                     Column(modifier = Modifier.weight(1f).fillMaxHeight()) {
                         when (vm.viewMode) {
                             0 -> MarkupSplitView(
                                 originalText = splitOriginal,
                                 markupText = vm.text,
                                 markedParagraphs = markedParagraphs,
+                                highlightRevision = vm.editorUiRevision,
                                 onMarkupTextChange = { newText -> vm.applyMarkupTextChange(newText) },
                                 onOriginalTextChange = { newOriginal ->
                                     vm.updateOriginalText(newOriginal)
@@ -275,14 +280,17 @@ fun MainScreen() {
                                     val voiceName = vm.segments[index].voiceName
                                     vm.segments.removeAt(index)
                                     vm.segments.addAll(index, parts.map { TextSegment(voiceName = voiceName, text = it) })
+                                    vm.commitSegmentEdits()
                                 },
                                 onMergeWithPrevious = { vm.mergeSegmentWithPrevious(it) },
                                 onMergeWithNext = { vm.mergeSegmentWithNext(it) },
                                 onRemarkupSegment = { vm.remarkupSegment(it) },
                                 remarkupParagraphIndices = vm.remarkupNeededParagraphIndices,
                                 onRemarkupParagraph = { vm.remarkupChapterParagraph(it) },
+                                onMergeParagraphWithPrevious = { vm.mergeChapterParagraphWithPrevious(it) },
                                 onChangeSegmentVoice = { index, newVoiceName ->
                                     vm.segments[index] = vm.segments[index].copy(voiceName = newVoiceName)
+                                    vm.commitSegmentEdits()
                                 },
                                 availableVoiceNames = vm.voiceMapping.keys.toList().sorted(),
                                 isLoading = vm.isLoading,
@@ -662,10 +670,10 @@ private fun applyParagraphReadinessHighlights(
 ): AnnotatedString {
     val origParas = TextParser.splitParagraphsForStorage(plainOriginal)
     val ranges = paragraphStorageNonBlankRangesForHighlight(plainOriginal)
-    if (origParas.isEmpty() || ranges.isEmpty() || origParas.size != ranges.size) return base
+    if (origParas.isEmpty() || ranges.isEmpty()) return base
 
     val b = AnnotatedString.Builder(base)
-    for (i in origParas.indices) {
+    for (i in 0 until minOf(origParas.size, ranges.size)) {
         val r = ranges[i]
         if (r.isEmpty() || i in remarkupIndices) continue
         val kind = ParagraphReadiness.classify(
@@ -676,6 +684,7 @@ private fun applyParagraphReadinessHighlights(
         )
         val color = when (kind) {
             ParagraphReadinessLabel.NoVoiceTags -> paragraphNoVoiceBg
+            ParagraphReadinessLabel.NarrationOnly -> paragraphReadyBg
             ParagraphReadinessLabel.DialogUnsplit -> paragraphNoVoiceBg
             ParagraphReadinessLabel.MarkedValid -> paragraphReadyBg
             ParagraphReadinessLabel.MarkedInvalid -> paragraphInvalidParaBg
@@ -757,6 +766,7 @@ private fun MarkupSplitView(
     originalText: String,
     markupText: String,
     markedParagraphs: List<String>,
+    highlightRevision: Int,
     onMarkupTextChange: (String) -> Unit,
     onOriginalTextChange: (String) -> Unit,
     validationResult: ValidationResult?,
@@ -812,19 +822,6 @@ private fun MarkupSplitView(
                     style = labelStyle.copy(color = indicatorColor),
                     modifier = Modifier.padding(horizontal = 8.dp),
                 )
-            } else if (validationResult != null) {
-                val validCount = validationResult.paragraphs.count { it.isValid }
-                val totalCount = validationResult.paragraphs.size
-                val indicatorColor = if (validationResult.isFullyValid) {
-                    Color(0xFF4CAF50)
-                } else {
-                    Color(0xFFFF9800)
-                }
-                Text(
-                    text = "$validCount/$totalCount",
-                    style = labelStyle.copy(color = indicatorColor),
-                    modifier = Modifier.padding(horizontal = 8.dp),
-                )
             }
             OutlinedButton(
                 onClick = onRevalidate,
@@ -852,7 +849,7 @@ private fun MarkupSplitView(
             HorizontalDivider()
         }
         Text(
-            "Абзацы в «Исходный текст»: зелёный фон — разметка валидна; синий — нет тегов [voice] " +
+            "Абзацы в «Исходный текст»: зелёный фон — готово или повествование без диалога; синий — нет [voice] и, вероятно, есть прямая речь " +
                 "(режим «Недостающие» берёт такие абзацы по порядку в тексте, с меньшего номера); оранжевый фон — ошибка «Проверить» или сбой авторазметки пакета.",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -918,7 +915,7 @@ private fun MarkupSplitView(
                 ),
             )
         }
-        LaunchedEffect(markupText, validationResult, onSurfaceColor, markupHasFocus, remarkupParagraphIndices) {
+        LaunchedEffect(markupText, validationResult, onSurfaceColor, markupHasFocus, remarkupParagraphIndices, highlightRevision) {
             val ann = if (markupHasFocus) {
                 AnnotatedString(markupText)
             } else {
@@ -955,7 +952,7 @@ private fun MarkupSplitView(
                 ),
             )
         }
-        LaunchedEffect(originalText, validationResult, originalFieldHasFocus, remarkupParagraphIndices, markedParagraphs) {
+        LaunchedEffect(originalText, validationResult, originalFieldHasFocus, remarkupParagraphIndices, markedParagraphs, highlightRevision) {
             val ann = annotateOriginalForMarkupView(
                 originalText,
                 validationResult,
@@ -1067,16 +1064,18 @@ private fun MarkupSplitView(
                         modifier = Modifier.fillMaxSize(),
                     ) {
                         Column(modifier = Modifier.fillMaxWidth()) {
-                            Text(
-                                text = annotateOriginalForMarkupView(
-                                    originalText,
-                                    validationResult,
-                                    remarkupParagraphIndices,
-                                    markedParagraphs,
-                                    focused = false,
-                                ),
-                                style = bodyStyle.copy(color = onSurfaceColor),
-                            )
+                            key(highlightRevision, originalText, markupText, remarkupParagraphIndices, validationResult, markedParagraphs) {
+                                Text(
+                                    text = annotateOriginalForMarkupView(
+                                        originalText,
+                                        validationResult,
+                                        remarkupParagraphIndices,
+                                        markedParagraphs,
+                                        focused = false,
+                                    ),
+                                    style = bodyStyle.copy(color = onSurfaceColor),
+                                )
+                            }
                             UnmatchedOriginalFooter(
                                 validationResult = validationResult,
                                 segments = segments,

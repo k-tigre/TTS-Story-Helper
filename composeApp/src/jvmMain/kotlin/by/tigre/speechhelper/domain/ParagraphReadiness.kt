@@ -1,13 +1,16 @@
 package by.tigre.speechhelper.domain
 
 /**
- * Состояние абзаца для UI. [NoVoiceTags] — тот же критерий, что и режим «Недостающие» в авторазметке:
- * в тексте абзаца нет пар меток `[voice]…[/voice]`.
+ * Состояние абзаца для UI.
+ * [NoVoiceTags] — нет [voice] и в тексте, по эвристике, есть прямая речь (нужна разметка диалога).
+ * [NarrationOnly] — нет [voice], но прямой речи не видно: достаточно обычного voice_main.
  */
 enum class ParagraphReadinessLabel {
     Empty,
-    /** В разметке этого абзаца нет тегов голоса — режим «недостающие» обработает его следующим среди «дырявых». */
+    /** Нет тегов голоса и, вероятно, есть диалог — попадёт в «Недостающие». */
     NoVoiceTags,
+    /** Нет тегов, но диалога нет — для озвучки хватит одного voice_main. */
+    NarrationOnly,
     /** Есть [voice_main], но прямая речь не вынесена в голос персонажа. */
     DialogUnsplit,
     /** Есть теги, но сверка с оригиналом не прошла. */
@@ -43,9 +46,9 @@ object ParagraphReadiness {
         originalJoined: String,
         markedParagraphs: List<String>,
     ): ChapterValidationSummary? {
-        if (validationResult == null) return null
         val origParas = TextParser.splitParagraphsForStorage(originalJoined)
-        val total = validationResult.paragraphs.size
+        if (origParas.isEmpty()) return null
+        val total = origParas.size
         var ready = 0
         var remarkup = 0
         var invalid = 0
@@ -54,13 +57,14 @@ object ParagraphReadiness {
         for (i in 0 until total) {
             when (
                 classify(
-                    origParas.getOrElse(i) { "" },
+                    origParas[i],
                     markedParagraphs.getOrElse(i) { "" },
-                    validationResult.paragraphs.getOrNull(i),
+                    validationResult?.paragraphs?.getOrNull(i),
                     remarkupNeeded = i in remarkupIndices,
                 )
             ) {
-                ParagraphReadinessLabel.MarkedValid -> ready++
+                ParagraphReadinessLabel.MarkedValid,
+                ParagraphReadinessLabel.NarrationOnly -> ready++
                 ParagraphReadinessLabel.RemarkupNeeded -> remarkup++
                 ParagraphReadinessLabel.MarkedInvalid -> invalid++
                 ParagraphReadinessLabel.DialogUnsplit -> dialogUnsplit++
@@ -88,7 +92,24 @@ object ParagraphReadiness {
     ): ParagraphReadinessLabel {
         if (remarkupNeeded) return ParagraphReadinessLabel.RemarkupNeeded
         if (originalParagraph.trim().isEmpty()) return ParagraphReadinessLabel.Empty
-        if (!TextParser.hasVoiceMarkers(markedParagraph)) return ParagraphReadinessLabel.NoVoiceTags
+        if (mapping?.isValid == true) {
+            // Multi-voice абзацы хранятся plain в marked rows ([refreshMarkedRowsForOriginals]).
+            if (!TextParser.hasVoiceMarkers(markedParagraph)) {
+                return ParagraphReadinessLabel.MarkedValid
+            }
+            if (TextParser.needsDialogVoiceSplit(markedParagraph, originalParagraph)) {
+                return ParagraphReadinessLabel.DialogUnsplit
+            }
+            return ParagraphReadinessLabel.MarkedValid
+        }
+        if (!TextParser.hasVoiceMarkers(markedParagraph)) {
+            val plain = originalParagraph.trim().ifBlank { TextParser.stripMarkup(markedParagraph).trim() }
+            return if (TextParser.hasDirectSpeech(plain)) {
+                ParagraphReadinessLabel.NoVoiceTags
+            } else {
+                ParagraphReadinessLabel.NarrationOnly
+            }
+        }
         if (TextParser.needsDialogVoiceSplit(markedParagraph, originalParagraph)) {
             return ParagraphReadinessLabel.DialogUnsplit
         }
